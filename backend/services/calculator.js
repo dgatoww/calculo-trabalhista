@@ -118,8 +118,61 @@ function calculateAvosForYear(admissionDate, dismissalDate, year, afastamentos =
 }
 
 /**
+ * Find the start date of the current aquisitive férias period.
+ * Applies the rule: if a single AUX.DOENÇA period lasted more than 6 consecutive months,
+ * the aquisitive period is zeroed and restarts from the day after the AUX.DOENÇA ended.
+ */
+function findFeriasPeriodStart(admissionDate, dismissalDate, afastamentos) {
+  const admission = parseDate(admissionDate);
+  const dismissal = parseDate(dismissalDate);
+  if (!admission || !dismissal) return null;
+
+  let periodStart = new Date(admission);
+
+  while (true) {
+    const nextPeriodStart = new Date(periodStart);
+    nextPeriodStart.setFullYear(nextPeriodStart.getFullYear() + 1);
+
+    if (nextPeriodStart > dismissal) {
+      // Current (incomplete) period — this is what we want
+      break;
+    }
+
+    // Check if any AUX.DOENÇA > 6 consecutive months ended within this period
+    const longAux = (afastamentos || []).find(af => {
+      if (af.tipo !== 'beneficio_comum') return false;
+      const afStart = parseDate(af.data_inicio);
+      const afEnd = parseDate(af.data_fim);
+      if (!afStart || !afEnd) return false;
+      // Duration > 6 months?
+      const sixMonthsLater = new Date(afStart);
+      sixMonthsLater.setMonth(sixMonthsLater.getMonth() + 6);
+      if (afEnd <= sixMonthsLater) return false;
+      // Did this AUX.DOENÇA end within the current aquisitive period?
+      return afEnd > periodStart && afEnd < nextPeriodStart;
+    });
+
+    if (longAux) {
+      // Reset: new period starts from day after AUX.DOENÇA ended (return to work)
+      const afEnd = parseDate(longAux.data_fim);
+      const returnDate = new Date(afEnd);
+      returnDate.setDate(returnDate.getDate() + 1);
+      periodStart = returnDate;
+      // Do NOT advance by 1 year — restart search from new period start
+      continue;
+    }
+
+    // This period completed normally — advance to next
+    periodStart = nextPeriodStart;
+  }
+
+  return periodStart;
+}
+
+/**
  * Calculate avos (twelfths) for proportional férias.
  * Based on the current (incomplete) aquisitive period.
+ * Applies AUX.DOENÇA > 6 months reset rule.
  */
 function calculateAvosFerias(admissionDate, dismissalDate, afastamentos = []) {
   const admission = parseDate(admissionDate);
@@ -127,17 +180,9 @@ function calculateAvosFerias(admissionDate, dismissalDate, afastamentos = []) {
 
   if (!admission || !dismissal) return 0;
 
-  // Find start of current aquisitive period
-  let periodStart = new Date(admission);
-  while (true) {
-    const nextPeriodStart = new Date(periodStart);
-    nextPeriodStart.setFullYear(nextPeriodStart.getFullYear() + 1);
-    if (nextPeriodStart <= dismissal) {
-      periodStart = nextPeriodStart;
-    } else {
-      break;
-    }
-  }
+  // Find start of current aquisitive period (with AUX.DOENÇA reset rule applied)
+  const periodStart = findFeriasPeriodStart(admissionDate, dismissalDate, afastamentos);
+  if (!periodStart) return 0;
 
   // Calculate avos from periodStart to dismissal, month by month
   let avos = 0;
@@ -291,11 +336,70 @@ function calculate(data) {
   const dailyRate = salary / 30;
   const grossSaldoSalario = dailyRate * daysWorkedInLastMonth;
 
-  // Deductions: prefer total_deducoes_mes_rescisao (from ficha financeira extractor)
-  const deducoes = parseFloat(total_deducoes_mes_rescisao) ||
-                   parseFloat(total_deducoes) ||
-                   parseFloat(valor_pago_ficha) || 0;
-  const netSaldoSalario = Math.max(0, grossSaldoSalario - deducoes);
+  // Deductions: compute from ficha_meses_json when available (most accurate)
+  let deducoesTotal = 0;
+  let deducoesItems = [];
+
+  if (data.ficha_meses_json) {
+    try {
+      const fichaMeses = JSON.parse(data.ficha_meses_json);
+      // Rescisão month key: YYYY-MM from ultimo_dia_trabalhado
+      const rescisaoMonthKey = lastWorked.toISOString().slice(0, 7);
+
+      const rescisaoMes = fichaMeses[rescisaoMonthKey];
+      if (rescisaoMes) {
+        // Adiantamento salarial (código 017, período 1) — already paid to employee
+        const adiantamento = rescisaoMes.p1 && rescisaoMes.p1['017'] ? rescisaoMes.p1['017'] : 0;
+        if (adiantamento > 0) {
+          deducoesItems.push({ descricao: 'Adiantamento Salarial (017/P1)', valor: adiantamento });
+          deducoesTotal += adiantamento;
+        }
+        // Fechamento salarial (código 001, período 2) — second half payment if already processed
+        const fechamento = rescisaoMes.p2 && rescisaoMes.p2['001'] ? rescisaoMes.p2['001'] : 0;
+        if (fechamento > 0) {
+          deducoesItems.push({ descricao: 'Fechamento Salarial (001/P2)', valor: fechamento });
+          deducoesTotal += fechamento;
+        }
+        // Other period 2 deductions (125, etc.)
+        if (rescisaoMes.p2) {
+          for (const [code, val] of Object.entries(rescisaoMes.p2)) {
+            if (code !== '001' && code !== '017' && val > 0) {
+              deducoesItems.push({ descricao: `Desconto cód.${code}/P2`, valor: val });
+              deducoesTotal += val;
+            }
+          }
+        }
+      }
+
+      // Deduct payments from months AFTER ultimo_dia_trabalhado (overpayments)
+      for (const [monthKey, mesData] of Object.entries(fichaMeses)) {
+        if (monthKey > rescisaoMonthKey) {
+          const p1Adiant = (mesData.p1 && mesData.p1['017']) || 0;
+          const p1Salary = (mesData.p1 && mesData.p1['001']) || 0;
+          const p2Salary = (mesData.p2 && mesData.p2['001']) || 0;
+          const mesTotal = p1Adiant + p1Salary + p2Salary;
+          if (mesTotal > 0) {
+            deducoesItems.push({ descricao: `Pagamento indevido ${monthKey}`, valor: mesTotal });
+            deducoesTotal += mesTotal;
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Failed to parse ficha_meses_json:', e.message);
+    }
+  }
+
+  // Fallback to legacy fields if no ficha_meses_json data
+  if (deducoesTotal === 0) {
+    deducoesTotal = parseFloat(total_deducoes_mes_rescisao) ||
+                    parseFloat(total_deducoes) ||
+                    parseFloat(valor_pago_ficha) || 0;
+    if (deducoesTotal > 0) {
+      deducoesItems = [{ descricao: 'Deduções (Ficha Financeira)', valor: deducoesTotal }];
+    }
+  }
+
+  const netSaldoSalario = Math.max(0, grossSaldoSalario - deducoesTotal);
 
   result.calculations.saldo_salario = {
     label: 'Saldo de Salário',
@@ -303,9 +407,10 @@ function calculate(data) {
     days_worked: daysWorkedInLastMonth,
     daily_rate: dailyRate,
     gross_value: grossSaldoSalario,
-    deductions: deducoes,
+    deductions: deducoesTotal,
+    deducoes_items: deducoesItems,
     net_value: netSaldoSalario,
-    formula: `(R$ ${salary.toFixed(2)} ÷ 30) × ${daysWorkedInLastMonth} dias = R$ ${grossSaldoSalario.toFixed(2)} - R$ ${deducoes.toFixed(2)} deduções = R$ ${netSaldoSalario.toFixed(2)}`
+    formula: `(R$ ${salary.toFixed(2)} ÷ 30) × ${daysWorkedInLastMonth} dias = R$ ${grossSaldoSalario.toFixed(2)}${deducoesTotal > 0 ? ` − R$ ${deducoesTotal.toFixed(2)} deduções = R$ ${netSaldoSalario.toFixed(2)}` : ''}`
   };
 
   // ========================================
@@ -340,7 +445,9 @@ function calculate(data) {
 
   if (docVencidasCount !== null && !isNaN(docVencidasCount)) {
     // Use count from extracted document (Rel. 11.004)
-    feriasVencidasValue = docVencidasCount * salary * (1 + 1 / 3);
+    const feriasVencidasBase = docVencidasCount * salary;
+    const feriasVencidasAdicional = feriasVencidasBase / 3;
+    feriasVencidasValue = feriasVencidasBase + feriasVencidasAdicional;
 
     if (ferias_vencidas_periodos) {
       try {
@@ -349,7 +456,9 @@ function calculate(data) {
           : ferias_vencidas_periodos;
         feriasVencidasPeriods = periodos.map(p => ({
           ...p,
-          value: salary * (1 + 1 / 3),
+          ferias_base: salary,
+          adicional_um_terco: salary / 3,
+          value: salary + salary / 3,
           days: 30
         }));
       } catch (e) { /* ignore parse errors */ }
@@ -358,10 +467,17 @@ function calculate(data) {
     // Fallback: calculate from dates — count ALL complete aquisitive periods
     const aquisitivePeriods = calculateAquisitivePeriods(admissionDate, dismissalDate);
     aquisitivePeriods.forEach(period => {
-      // All complete aquisitive periods are treated as vencidas in rescisão context
-      const periodoValue = salary * (1 + 1 / 3);
+      const periodoBase = salary;
+      const periodoAdicional = salary / 3;
+      const periodoValue = periodoBase + periodoAdicional;
       feriasVencidasValue += periodoValue;
-      feriasVencidasPeriods.push({ ...period, value: periodoValue, days: 30 });
+      feriasVencidasPeriods.push({
+        ...period,
+        ferias_base: periodoBase,
+        adicional_um_terco: periodoAdicional,
+        value: periodoValue,
+        days: 30
+      });
     });
   }
 
@@ -369,14 +485,19 @@ function calculate(data) {
     feriasVencidasValue = parseFloat(data.ferias_vencidas_manual) || feriasVencidasValue;
   }
 
+  const feriasVencidasBase = feriasVencidasPeriods.reduce((s, p) => s + (p.ferias_base || 0), 0);
+  const feriasVencidasAdicional = feriasVencidasPeriods.reduce((s, p) => s + (p.adicional_um_terco || 0), 0);
+
   result.calculations.ferias_vencidas = {
     label: 'Férias Vencidas',
     periods: feriasVencidasPeriods,
     salary,
+    ferias_base: feriasVencidasBase,
+    adicional_um_terco: feriasVencidasAdicional,
     gross_value: feriasVencidasValue,
     net_value: feriasVencidasValue,
     formula: feriasVencidasPeriods.length > 0
-      ? `${feriasVencidasPeriods.length} período(s) × R$ ${salary.toFixed(2)} × (1 + 1/3) = R$ ${feriasVencidasValue.toFixed(2)}`
+      ? `${feriasVencidasPeriods.length} período(s) × R$ ${salary.toFixed(2)} + 1/3 (R$ ${(salary / 3).toFixed(2)}) = R$ ${feriasVencidasValue.toFixed(2)}`
       : 'Sem férias vencidas'
   };
 
@@ -384,28 +505,33 @@ function calculate(data) {
   // 4. FÉRIAS PROPORCIONAIS + 1/3
   // ========================================
   const avosFerias = calculateAvosFerias(admissionDate, dismissalDate, afastamentos);
-  const feriasProporcValue = (avosFerias / 12) * salary * (1 + 1 / 3);
+  const periodStartFerias = findFeriasPeriodStart(admissionDate, dismissalDate, afastamentos);
+  const feriasProporcBase = (avosFerias / 12) * salary;
+  const feriasProporcAdicional = feriasProporcBase / 3;
+  const feriasProporcTotal = feriasProporcBase + feriasProporcAdicional;
 
   result.calculations.ferias_proporcionais = {
     label: 'Férias Proporcionais + 1/3',
     salary,
     avos: avosFerias,
-    multiplier: 1 + 1 / 3,
-    gross_value: feriasProporcValue,
-    net_value: feriasProporcValue,
-    formula: `${avosFerias}/12 × R$ ${salary.toFixed(2)} × (1 + 1/3) = R$ ${feriasProporcValue.toFixed(2)}`
+    periodo_aquisitivo_inicio: periodStartFerias ? periodStartFerias.toISOString().split('T')[0] : null,
+    ferias_base: feriasProporcBase,
+    adicional_um_terco: feriasProporcAdicional,
+    gross_value: feriasProporcTotal,
+    net_value: feriasProporcTotal,
+    formula: `${avosFerias}/12 × R$ ${salary.toFixed(2)} = R$ ${feriasProporcBase.toFixed(2)} + 1/3 (R$ ${feriasProporcAdicional.toFixed(2)}) = R$ ${feriasProporcTotal.toFixed(2)}`
   };
 
   // ========================================
   // TOTAL
   // ========================================
-  result.total = netSaldoSalario + net13 + feriasVencidasValue + feriasProporcValue;
+  result.total = netSaldoSalario + net13 + feriasVencidasValue + feriasProporcTotal;
 
   result.summary = {
     saldo_salario: netSaldoSalario,
     decimo_terceiro: net13,
     ferias_vencidas: feriasVencidasValue,
-    ferias_proporcionais: feriasProporcValue,
+    ferias_proporcionais: feriasProporcTotal,
     total: result.total
   };
 
@@ -413,7 +539,7 @@ function calculate(data) {
     saldo_salario: formatCurrency(netSaldoSalario),
     decimo_terceiro: formatCurrency(net13),
     ferias_vencidas: formatCurrency(feriasVencidasValue),
-    ferias_proporcionais: formatCurrency(feriasProporcValue),
+    ferias_proporcionais: formatCurrency(feriasProporcTotal),
     total: formatCurrency(result.total)
   };
 
@@ -445,6 +571,7 @@ module.exports = {
   calculateAvosForYear,
   calculateAquisitivePeriods,
   calculateAvosFerias,
+  findFeriasPeriodStart,
   getAfastamentoDaysInMonth,
   formatCurrency,
   formatDate,

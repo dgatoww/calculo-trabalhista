@@ -467,12 +467,23 @@ export default function CalculationResult({ caseData, setLoading, setLoadingMess
             <span style={styles.detailVal}>{formatCurrency(calculations.saldo_salario.gross_value)}</span>
           </div>
           {calculations.saldo_salario.deductions > 0 && (
-            <div style={styles.detailRow}>
-              <span style={styles.detailKey}>Deduções (Ficha Financeira)</span>
-              <span style={{ ...styles.detailVal, color: '#e53e3e' }}>
-                ({formatCurrency(calculations.saldo_salario.deductions)})
-              </span>
-            </div>
+            calculations.saldo_salario.deducoes_items && calculations.saldo_salario.deducoes_items.length > 0
+              ? calculations.saldo_salario.deducoes_items.map((item, i) => (
+                  <div key={i} style={styles.detailRow}>
+                    <span style={styles.detailKey}>(–) {item.descricao}</span>
+                    <span style={{ ...styles.detailVal, color: '#e53e3e' }}>
+                      ({formatCurrency(item.valor)})
+                    </span>
+                  </div>
+                ))
+              : (
+                <div style={styles.detailRow}>
+                  <span style={styles.detailKey}>(–) Deduções (Ficha Financeira)</span>
+                  <span style={{ ...styles.detailVal, color: '#e53e3e' }}>
+                    ({formatCurrency(calculations.saldo_salario.deductions)})
+                  </span>
+                </div>
+              )
           )}
           <div style={{ ...styles.detailRow, fontWeight: '700', borderTop: '2px solid #e2e8f0' }}>
             <span style={{ ...styles.detailKey, fontWeight: '700', color: '#1a202c' }}>
@@ -586,6 +597,18 @@ export default function CalculationResult({ caseData, setLoading, setLoadingMess
               Nenhum período de férias vencidas identificado.
             </div>
           )}
+          {calculations.ferias_vencidas.ferias_base > 0 && (
+            <div style={styles.detailRow}>
+              <span style={styles.detailKey}>Férias (base, sem 1/3)</span>
+              <span style={styles.detailVal}>{formatCurrency(calculations.ferias_vencidas.ferias_base)}</span>
+            </div>
+          )}
+          {calculations.ferias_vencidas.adicional_um_terco > 0 && (
+            <div style={styles.detailRow}>
+              <span style={styles.detailKey}>(+) Adicional 1/3</span>
+              <span style={styles.detailVal}>{formatCurrency(calculations.ferias_vencidas.adicional_um_terco)}</span>
+            </div>
+          )}
           <div style={styles.formulaBox}>
             Fórmula: {calculations.ferias_vencidas.formula}
           </div>
@@ -605,20 +628,28 @@ export default function CalculationResult({ caseData, setLoading, setLoadingMess
             <span style={styles.detailKey}>Salário base</span>
             <span style={styles.detailVal}>{formatCurrency(calculations.ferias_proporcionais.salary)}</span>
           </div>
+          {calculations.ferias_proporcionais.periodo_aquisitivo_inicio && (
+            <div style={styles.detailRow}>
+              <span style={styles.detailKey}>Início do período aquisitivo</span>
+              <span style={styles.detailVal}>{formatDate(calculations.ferias_proporcionais.periodo_aquisitivo_inicio)}</span>
+            </div>
+          )}
           <div style={styles.detailRow}>
             <span style={styles.detailKey}>Avos do período aquisitivo</span>
             <span style={styles.detailVal}>
               {calculations.ferias_proporcionais.avos}/12
               <span style={{ fontSize: '11px', color: '#718096', marginLeft: '6px' }}>
-                (meses com ≥ 15 dias no período aquisitivo)
+                (meses com ≥ 15 dias | LIC.MATERNIDADE conta, AUX.DOENÇA não conta)
               </span>
             </span>
           </div>
           <div style={styles.detailRow}>
-            <span style={styles.detailKey}>Multiplicador (+ 1/3 constitucional)</span>
-            <span style={styles.detailVal}>
-              {calculations.ferias_proporcionais.multiplier?.toFixed(4) || '1.3333'}
-            </span>
+            <span style={styles.detailKey}>Férias proporcionais (avos/12 × salário)</span>
+            <span style={styles.detailVal}>{formatCurrency(calculations.ferias_proporcionais.ferias_base)}</span>
+          </div>
+          <div style={styles.detailRow}>
+            <span style={styles.detailKey}>(+) Adicional constitucional 1/3</span>
+            <span style={styles.detailVal}>{formatCurrency(calculations.ferias_proporcionais.adicional_um_terco)}</span>
           </div>
           <div style={{ ...styles.detailRow, fontWeight: '700', borderTop: '2px solid #e2e8f0' }}>
             <span style={{ ...styles.detailKey, fontWeight: '700', color: '#1a202c' }}>

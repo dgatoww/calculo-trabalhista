@@ -205,18 +205,39 @@ function createCalculationTable(calculations, summary) {
     );
   }
 
-  // Férias proporcionais
+  // Férias proporcionais — show base and 1/3 separately
   const feriasProp = calculations.ferias_proporcionais;
   if (feriasProp) {
-    rows.push(
-      new TableRow({
-        children: [
-          createCell('Férias Proporcionais + 1/3', { width: 5000 }),
-          createCell(`${feriasProp.avos}/12 avos + 1/3`, { width: 3000 }),
-          createCell(formatCurrency(feriasProp.net_value), { width: 2000, alignment: AlignmentType.RIGHT })
-        ]
-      })
-    );
+    if (feriasProp.ferias_base > 0) {
+      rows.push(
+        new TableRow({
+          children: [
+            createCell('Férias Proporcionais', { width: 5000 }),
+            createCell(`${feriasProp.avos}/12 avos × salário`, { width: 3000 }),
+            createCell(formatCurrency(feriasProp.ferias_base), { width: 2000, alignment: AlignmentType.RIGHT })
+          ]
+        })
+      );
+      rows.push(
+        new TableRow({
+          children: [
+            createCell('  (+) Adicional 1/3 de Férias Proporcionais', { width: 5000 }),
+            createCell('1/3 constitucional', { width: 3000 }),
+            createCell(formatCurrency(feriasProp.adicional_um_terco), { width: 2000, alignment: AlignmentType.RIGHT })
+          ]
+        })
+      );
+    } else {
+      rows.push(
+        new TableRow({
+          children: [
+            createCell('Férias Proporcionais + 1/3', { width: 5000 }),
+            createCell(`${feriasProp.avos}/12 avos + 1/3`, { width: 3000 }),
+            createCell(formatCurrency(feriasProp.net_value), { width: 2000, alignment: AlignmentType.RIGHT })
+          ]
+        })
+      );
+    }
   }
 
   // Total row
@@ -418,6 +439,23 @@ async function generate(caseInfo, data, calculationResult) {
           new Paragraph({
             children: [normalText(`Avos contados: ${calculations.ferias_proporcionais?.avos || 0}/12 (meses com ≥ 15 dias no período aquisitivo)`)],
             spacing: { before: 60, after: 60 },
+            indent: { left: 360 }
+          }),
+          ...(calculations.ferias_proporcionais?.periodo_aquisitivo_inicio ? [
+            new Paragraph({
+              children: [normalText(`Período aquisitivo iniciado em: ${formatDate(calculations.ferias_proporcionais.periodo_aquisitivo_inicio)}`)],
+              spacing: { before: 60, after: 60 },
+              indent: { left: 360 }
+            })
+          ] : []),
+          new Paragraph({
+            children: [normalText(`   • Férias proporcionais (base): ${formatCurrency(calculations.ferias_proporcionais?.ferias_base || 0)}`)],
+            spacing: { before: 60, after: 40 },
+            indent: { left: 360 }
+          }),
+          new Paragraph({
+            children: [normalText(`   • Adicional 1/3 constitucional: ${formatCurrency(calculations.ferias_proporcionais?.adicional_um_terco || 0)}`)],
+            spacing: { before: 40, after: 60 },
             indent: { left: 360 }
           }),
 

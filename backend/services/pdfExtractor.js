@@ -80,7 +80,7 @@ function parseBrazilianDate(dateStr) {
   };
 
   // "DD de Mês de YYYY"
-  const namedMatch = dateStr.match(/(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})/i);
+  const namedMatch = dateStr.match(/(\d{1,2})\s+de\s+([A-Za-zÀ-ÿ]+)\s+de\s+(\d{4})/i);
   if (namedMatch) {
     const month = months[namedMatch[2].toLowerCase()];
     if (month) {
@@ -126,8 +126,10 @@ function extractAtaAudiencia(text) {
   }
 
   // Data da audiência → data_rescisao
-  // Pattern: "Em 13 de março de 2026" or similar
-  const dataAudienciaMatch = text.match(/Em\s+(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})/i);
+  // Pattern: "Em 13 de março de 2026" or similar (handles accented months like março, fevereiro)
+  // Normalize text to collapse multiple spaces/newlines
+  const normalizedText = text.replace(/\s+/g, ' ');
+  const dataAudienciaMatch = normalizedText.match(/Em\s+(\d{1,2})\s+de\s+([A-Za-zÀ-ÿ]+)\s+de\s+(\d{4})/i);
   if (dataAudienciaMatch) {
     const months = {
       'janeiro': '01', 'fevereiro': '02', 'março': '03', 'marco': '03',
@@ -241,39 +243,84 @@ function extractHistoricoMovimentacoes(text) {
     const sectionText = text.slice(afastamentoSectionIdx);
     const sectionLines = sectionText.split('\n').slice(1); // skip header line
     const afastamentos = [];
-    const datePattern = /(\d{2}\/\d{2}\/\d{4})/g;
+
+    // Buffer to accumulate tokens when dates span across lines
+    let dateBuffer = [];
+    let motivoBuffer = '';
+
+    const classifyMotivo = (str) => {
+      const up = str.toUpperCase();
+      if (up.includes('AUX.DOENCA') || up.includes('AUX. DOENCA') ||
+          up.includes('AUX.DOENÇA') || up.includes('AUXILIO DOENCA') ||
+          up.includes('AUXÍLIO DOENÇA') || up.includes('AUXILIO-DOENCA')) {
+        return { motivo: 'AUX.DOENCA', tipo: 'beneficio_comum' };
+      }
+      if (up.includes('MATERNIDADE')) {
+        return { motivo: up.includes('LIC') ? 'LIC.MATERNIDADE' : 'MATERNIDADE', tipo: 'licenca_maternidade' };
+      }
+      if (up.includes('ACIDENTE')) {
+        return { motivo: 'ACIDENTE DE TRABALHO', tipo: 'beneficio_comum' };
+      }
+      return { motivo: str.trim(), tipo: 'outros' };
+    };
+
+    const flushBuffer = () => {
+      if (dateBuffer.length >= 2) {
+        const dataInicio = parseBrazilianDate(dateBuffer[0]);
+        const dataFim = parseBrazilianDate(dateBuffer[1]);
+        if (dataInicio && dataFim) {
+          const { motivo, tipo } = classifyMotivo(motivoBuffer);
+          afastamentos.push({ data_inicio: dataInicio, data_fim: dataFim, motivo, tipo });
+        }
+      }
+      dateBuffer = [];
+      motivoBuffer = '';
+    };
 
     for (const line of sectionLines) {
       if (!line.trim()) continue;
-      // Stop at next major section
+      // Stop at next major section (but not AFASTAMENTOS itself)
       if (/HISTORICO\s+DE\s+/i.test(line) && !/AFASTAMENTO/i.test(line)) break;
+      // Skip header lines (INICIO, FIM, MOTIVO, etc.)
+      if (/^(INICIO|IN[IÍ]CIO|FIM|DATA|MOTIVO|TIPO|DIAS)\s/i.test(line.trim())) continue;
 
       const datesInLine = [...line.matchAll(/(\d{2}\/\d{2}\/\d{4})/g)];
+
       if (datesInLine.length >= 2) {
+        // Flush previous buffer if any
+        flushBuffer();
+        // Extract both dates and optional motivo from this line
         const dataInicio = parseBrazilianDate(datesInLine[0][1]);
         const dataFim = parseBrazilianDate(datesInLine[1][1]);
-        if (!dataInicio || !dataFim) continue;
-
-        const upperLine = line.toUpperCase();
-        let motivo = '';
-        let tipo = 'outros';
-
-        if (upperLine.includes('AUX.DOENCA') || upperLine.includes('AUX. DOENCA') ||
-            upperLine.includes('AUXILIO DOENCA') || upperLine.includes('AUXÍLIO DOENÇA')) {
-          motivo = 'AUX.DOENCA';
-          tipo = 'beneficio_comum';
-        } else if (upperLine.includes('MATERNIDADE')) {
-          motivo = upperLine.includes('LIC') ? 'LIC.MATERNIDADE' : 'MATERNIDADE';
-          tipo = 'licenca_maternidade';
-        } else {
-          // Try to extract motivo from line
-          const motivoMatch = line.match(/\d{2}\/\d{2}\/\d{4}\s+\d{2}\/\d{2}\/\d{4}\s+(.+)/);
-          if (motivoMatch) motivo = motivoMatch[1].trim();
+        if (dataInicio && dataFim) {
+          // Motivo: everything after the second date
+          const afterSecondDate = line.slice(line.indexOf(datesInLine[1][1]) + 10).trim();
+          const { motivo, tipo } = classifyMotivo(afterSecondDate || line);
+          afastamentos.push({ data_inicio: dataInicio, data_fim: dataFim, motivo, tipo });
         }
-
-        afastamentos.push({ data_inicio: dataInicio, data_fim: dataFim, motivo, tipo });
+      } else if (datesInLine.length === 1) {
+        // One date per line — accumulate
+        if (dateBuffer.length === 0) {
+          dateBuffer.push(datesInLine[0][1]);
+          // Capture any text that might be the motivo
+          const afterDate = line.slice(line.indexOf(datesInLine[0][1]) + 10).trim();
+          if (afterDate) motivoBuffer = afterDate;
+        } else if (dateBuffer.length === 1) {
+          dateBuffer.push(datesInLine[0][1]);
+          const afterDate = line.slice(line.indexOf(datesInLine[0][1]) + 10).trim();
+          if (afterDate) motivoBuffer += ' ' + afterDate;
+          // Try to get motivo from the whole line too
+          const fullLineMotivo = line.trim();
+          if (!motivoBuffer) motivoBuffer = fullLineMotivo;
+          flushBuffer();
+        }
+      } else if (dateBuffer.length > 0) {
+        // No dates in this line but we have a buffer — might be a motivo continuation
+        motivoBuffer += ' ' + line.trim();
       }
     }
+    // Flush any remaining
+    flushBuffer();
 
     if (afastamentos.length > 0) {
       fields.afastamentos = JSON.stringify(afastamentos);
@@ -425,6 +472,9 @@ function extractFichaFinanceira(text) {
     if (hasValues) { targetKey = key; break; }
   }
 
+  // Always store all months for later use by calculator
+  fields.ficha_meses_json = JSON.stringify(months);
+
   if (targetKey) {
     const m = months[targetKey];
 
@@ -435,20 +485,37 @@ function extractFichaFinanceira(text) {
       fields.salario = m.p1['001'];
     }
 
-    // Adiantamento (quinzena): code 017 from PERIODO 1
+    // Adiantamento salarial: code 017 from PERIODO 1 (already received by employee)
     const adiantamento = (m.p1['017'] || 0);
     if (adiantamento > 0) {
       fields.adiantamento_quinzena = adiantamento;
     }
 
-    // Deductions to subtract from saldo (codes 017 and 125 are deductions in PERIODO 2)
+    // Fechamento: code 001 from PERIODO 2 (salary payment for second half if already paid)
+    const fechamento = (m.p2['001'] || 0);
+    if (fechamento > 0) {
+      fields.fechamento_salario = fechamento;
+    }
+
+    // Build deductions list:
+    // - Adiantamento (017 period 1): already paid to employee → deduct from saldo
+    // - Fechamento (001 period 2): if already paid → deduct from saldo
+    // - Other period 2 deductions (125, etc.)
     const deducoes = [];
-    const deductionCodes = ['017', '125'];
-    for (const code of deductionCodes) {
+    if (adiantamento > 0) {
+      deducoes.push({ codigo: '017', periodo: 1, descricao: 'Adiantamento Salarial', valor: adiantamento });
+    }
+    if (fechamento > 0) {
+      deducoes.push({ codigo: '001', periodo: 2, descricao: 'Fechamento Salarial', valor: fechamento });
+    }
+    // Additional period 2 deductions (125, etc. — excluding 001 and 017 already handled)
+    const extraDeductionCodes = ['125'];
+    for (const code of extraDeductionCodes) {
       if (m.p2[code]) {
-        deducoes.push({ codigo: code, valor: m.p2[code] });
+        deducoes.push({ codigo: code, periodo: 2, descricao: `Desconto cód.${code}`, valor: m.p2[code] });
       }
     }
+
     if (deducoes.length > 0) {
       fields.deducoes_ficha = JSON.stringify(deducoes);
       fields.total_deducoes_mes_rescisao = deducoes.reduce((sum, d) => sum + d.valor, 0);
