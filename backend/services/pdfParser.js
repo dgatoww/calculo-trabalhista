@@ -7,6 +7,22 @@ const MESES = {
   'agosto': 8, 'setembro': 9, 'outubro': 10, 'novembro': 11, 'dezembro': 12
 };
 
+// Converte valor BR "1.780,00" ou "1780,00" para float
+function parseBRCurrency(str) {
+  if (!str) return null;
+  str = str.trim();
+  if (str.includes(',')) {
+    // Formato BR: "1.780,00" → remover pontos de milhar, trocar vírgula por ponto
+    return parseFloat(str.replace(/\./g, '').replace(',', '.'));
+  }
+  // Formato US ou sem decimais: "1780.00" ou "1780"
+  return parseFloat(str.replace(/,/g, ''));
+}
+
+// Regex para capturar valor monetário BR: obriga vírgula + 2 decimais exatos
+// Isso evita capturar taxas como "0,00481" (5 decimais)
+const BRL_VALUE = /[\d.]+,\d{2}(?!\d)/;
+
 async function extractTextFromPDF(filePath) {
   const buffer = fs.readFileSync(filePath);
   const data = await pdfParse(buffer);
@@ -20,30 +36,60 @@ function parseAtaAudiencia(text) {
   const processoMatch = text.match(/(\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4})/);
   if (processoMatch) result.numero_processo = processoMatch[1];
 
-  // Data da audiencia (data rescisao)
-  const dataMatch = text.match(/Em\s+(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})/i);
-  if (dataMatch) {
-    const dia = dataMatch[1].padStart(2, '0');
-    const mes = MESES[dataMatch[2].toLowerCase()];
-    const ano = dataMatch[3];
-    if (mes) result.data_rescisao = `${dia}/${String(mes).padStart(2, '0')}/${ano}`;
+  // Data da audiencia (data rescisao) - múltiplos padrões PJe
+  const dataPatterns = [
+    /Em\s+(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})/i,
+    /Aos\s+(\d{1,2})\s+(?:\(\w+\)\s+)?dias?\s+do\s+m[eê]s\s+de\s+(\w+)\s+de\s+(\d{4})/i,
+    /Aos\s+(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})/i,
+    /realizada\s+(?:em\s+)?(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})/i,
+    /data[:\s]+(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})/i,
+  ];
+  for (const pattern of dataPatterns) {
+    const m = text.match(pattern);
+    if (m) {
+      const dia = m[1].padStart(2, '0');
+      const mesStr = m[2].toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      const mes = MESES[m[2].toLowerCase()] || MESES[mesStr];
+      const ano = m[3];
+      if (mes) {
+        result.data_rescisao = `${dia}/${String(mes).padStart(2, '0')}/${ano}`;
+        break;
+      }
+    }
   }
 
-  // Reclamante
-  const reclamanteMatch = text.match(/RECLAMANTE[:\s]+([A-ZÁÉÍÓÚÂÊÎÔÛÃÕÀÈÌÒÙÇ\s]+?)(?:\n|CPF|RG|$)/i);
-  if (reclamanteMatch) result.nome_reclamante = reclamanteMatch[1].trim();
+  // Reclamante — nome em maiúsculas após o marcador
+  const reclamanteMatch = text.match(/RECLAMANTE[:\s]+([^\n\r,;]+)/i);
+  if (reclamanteMatch) result.nome_reclamante = reclamanteMatch[1].replace(/CPF.*/i, '').trim();
 
-  // Reclamado
-  const reclamadoMatch = text.match(/RECLAMAD[OA][:\s]+([A-ZÁÉÍÓÚÂÊÎÔÛÃÕÀÈÌÒÙÇ\s]+?)(?:\n|CNPJ|CPF|$)/i);
-  if (reclamadoMatch) result.nome_reclamada = reclamadoMatch[1].trim();
+  // Reclamada — permite letras, números, /,. (LTDA, S/A, CNPJ na mesma linha)
+  const reclamadoPatterns = [
+    /RECLAMAD[OA][:\s]+([^\n\r]+)/i,
+    /EMPRESA[:\s]+([^\n\r]+)/i,
+    /EMPREGADOR[A]?[:\s]+([^\n\r]+)/i,
+  ];
+  for (const pattern of reclamadoPatterns) {
+    const m = text.match(pattern);
+    if (m) {
+      result.nome_reclamada = m[1].replace(/CNPJ.*/i, '').replace(/CPF.*/i, '').trim();
+      break;
+    }
+  }
 
   // Data admissao (na secao FGTS)
-  const admissaoMatch = text.match(/[Aa]dmiss[ãa]o[:\s]+(\d{2}\/\d{2}\/\d{4})/);
-  if (admissaoMatch) result.data_admissao = admissaoMatch[1];
+  const admissaoPatterns = [
+    /[Aa]dmiss[ãa]o[:\s]+(\d{2}\/\d{2}\/\d{4})/,
+    /DATA\s+DE\s+ADMISS[ÃA]O[:\s]+(\d{2}\/\d{2}\/\d{4})/i,
+    /admitid[ao]\s+em[:\s]+(\d{2}\/\d{2}\/\d{4})/i,
+  ];
+  for (const pattern of admissaoPatterns) {
+    const m = text.match(pattern);
+    if (m) { result.data_admissao = m[1]; break; }
+  }
 
   // Valor da causa
-  const valorMatch = text.match(/Valor\s+da\s+causa[:\s]+R\$\s*([\d.,]+)/i);
-  if (valorMatch) result.valor_causa = parseFloat(valorMatch[1].replace(/\./g, '').replace(',', '.'));
+  const valorMatch = text.match(/Valor\s+da\s+causa[:\s]+R\$\s*([\d.]+,\d{2})/i);
+  if (valorMatch) result.valor_causa = parseBRCurrency(valorMatch[1]);
 
   return result;
 }
@@ -52,41 +98,60 @@ function parseHistoricoMovimentacoes(text) {
   const result = {};
 
   // Nome
-  const nomeMatch = text.match(/NOME[:\s]+([A-ZÁÉÍÓÚÂÊÎÔÛÃÕÀÈÌÒÙÇ\s]+?)(?:\n|$)/i);
+  const nomeMatch = text.match(/NOME[:\s]+([A-ZÁÉÍÓÚÂÊÎÔÛÃÕÀÈÌÒÙÇ\s]+?)(?:\n|\r|$)/i);
   if (nomeMatch) result.nome = nomeMatch[1].trim();
 
   // Data admissao
-  const admissaoMatch = text.match(/DATA\s+ADMISS[ÃA]O[:\s]+(\d{2}\/\d{2}\/\d{4})/i);
-  if (admissaoMatch) result.data_admissao = admissaoMatch[1];
+  const admissaoPatterns = [
+    /DATA\s+ADMISS[ÃA]O[:\s]+(\d{2}\/\d{2}\/\d{4})/i,
+    /ADMISS[ÃA]O[:\s]+(\d{2}\/\d{2}\/\d{4})/i,
+    /DT\s*ADM[:\s]+(\d{2}\/\d{2}\/\d{4})/i,
+  ];
+  for (const pattern of admissaoPatterns) {
+    const m = text.match(pattern);
+    if (m) { result.data_admissao = m[1]; break; }
+  }
 
   // Cargo
-  const cargoMatch = text.match(/CARGO[:\s]+([^\n]+)/i);
+  const cargoMatch = text.match(/CARGO[:\s]+([^\n\r]+)/i);
   if (cargoMatch) result.cargo = cargoMatch[1].trim();
 
-  // Ultimo salario - pegar ultimo valor na tabela HISTORICO DE MUDANCA DE SALARIO
-  const salarioSection = text.match(/HIST[OÓ]RICO DE MUDAN[CÇ]A DE SAL[ÁA]RIO([\s\S]*?)(?:HIST[OÓ]RICO|$)/i);
+  // Ultimo salario — exige formato BRL (vírgula + 2 casas exatas)
+  // Tenta extrair a seção de mudança de salário primeiro
+  const salarioSection = text.match(/HIST[OÓ]RICO DE MUDAN[CÇ]A DE SAL[ÁA]RIO([\s\S]*?)(?:HIST[OÓ]RICO|AFASTAMENTO|$)/i);
   if (salarioSection) {
-    const salarioMatches = salarioSection[1].matchAll(/(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)/g);
-    let lastSalario = null;
-    for (const match of salarioMatches) {
-      lastSalario = parseFloat(match[2].replace(/\./g, '').replace(',', '.'));
+    const salarioMatches = [...salarioSection[1].matchAll(/(\d{2}\/\d{2}\/\d{4})[^\n]*([\d.]+,\d{2})(?!\d)/g)];
+    if (salarioMatches.length > 0) {
+      const last = salarioMatches[salarioMatches.length - 1];
+      result.salario = parseBRCurrency(last[2]);
     }
-    if (lastSalario) result.salario = lastSalario;
+  }
+  // Fallback: procurar salário sem seção específica
+  if (!result.salario) {
+    const salFallback = [...text.matchAll(/SAL[ÁA]RIO[^\n]*([\d.]+,\d{2})(?!\d)/gi)];
+    if (salFallback.length > 0) {
+      result.salario = parseBRCurrency(salFallback[salFallback.length - 1][1]);
+    }
   }
 
-  // Afastamentos
+  // Afastamentos — busca seção específica, depois full-text
   const afastamentos = [];
-  const afastSection = text.match(/HIST[OÓ]RICO DE AFASTAMENTOS([\s\S]*?)(?:HIST[OÓ]RICO|$)/i);
-  if (afastSection) {
-    const auxMatches = afastSection[1].matchAll(/AUX\.DOEN[CÇ]A\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{2}\/\d{2}\/\d{4})/gi);
-    for (const match of auxMatches) {
-      afastamentos.push({ tipo: 'beneficio_comum', inicio: match[1], fim: match[2] });
-    }
-    const matMatches = afastSection[1].matchAll(/LIC\.MATERNIDADE\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{2}\/\d{2}\/\d{4})/gi);
-    for (const match of matMatches) {
-      afastamentos.push({ tipo: 'licenca_maternidade', inicio: match[1], fim: match[2] });
-    }
+  const afastText = (() => {
+    const sec = text.match(/HIST[OÓ]RICO DE AFASTAMENTOS([\s\S]*?)(?:HIST[OÓ]RICO|$)/i);
+    return sec ? sec[1] : text;
+  })();
+
+  // AUX.DOENÇA — data início e fim na mesma linha ou linhas próximas
+  const auxPattern = /AUX[.\s]*DOEN[CÇ]A\D{0,30}(\d{2}\/\d{2}\/\d{4})\D{1,20}(\d{2}\/\d{2}\/\d{4})/gi;
+  for (const m of afastText.matchAll(auxPattern)) {
+    afastamentos.push({ tipo: 'beneficio_comum', inicio: m[1], fim: m[2] });
   }
+
+  const matPattern = /LIC[.\s]*MATERNIDADE\D{0,30}(\d{2}\/\d{2}\/\d{4})\D{1,20}(\d{2}\/\d{2}\/\d{4})/gi;
+  for (const m of afastText.matchAll(matPattern)) {
+    afastamentos.push({ tipo: 'licenca_maternidade', inicio: m[1], fim: m[2] });
+  }
+
   result.afastamentos = afastamentos;
 
   return result;
@@ -95,21 +160,34 @@ function parseHistoricoMovimentacoes(text) {
 function parseCartaoPonto(text) {
   const result = {};
 
-  const linhas = text.split('\n');
+  const linhas = text.split(/\r?\n/);
   let ultimoDiaTrabalhado = null;
 
-  const ignorar = ['ATESTADO MEDICO', 'AUX.DOENCA', 'LIC.MATERNIDADE', 'PEDIDO DE RESCISAO', 'PEDIDO DE RESCISÃO'];
+  const ignorar = [
+    'ATESTADO', 'AUX.DOENCA', 'AUX. DOENCA', 'AUX DOENCA',
+    'LIC.MATERNIDADE', 'LIC. MATERNIDADE', 'LIC MATERNIDADE',
+    'PEDIDO DE RESCISAO', 'PEDIDO DE RESCISÃO', 'FERIADO', 'FOLGA'
+  ];
 
   for (const linha of linhas) {
     const linhaUpper = linha.toUpperCase();
     if (ignorar.some(ig => linhaUpper.includes(ig))) continue;
 
-    // Linha com horarios reais: HH:MM HH:MM HH:MM HH:MM + data
-    const horariosMatch = linha.match(/(\d{2}:\d{2})\s+(\d{2}:\d{2})\s+(\d{2}:\d{2})\s+(\d{2}:\d{2})/);
-    const dataMatch = linha.match(/(\d{2}\/\d{2}\/\d{4}|\d{2}\/\d{2}\/\d{2})/);
+    // Data na linha: DD/MM/AAAA ou DD/MM/AA
+    const dataMatch = linha.match(/(\d{2}\/\d{2}\/\d{2,4})/);
+    if (!dataMatch) continue;
 
-    if (horariosMatch && dataMatch) {
-      ultimoDiaTrabalhado = dataMatch[1];
+    // Precisa ter pelo menos 2 horários no formato HH:MM
+    const horarios = linha.match(/\d{2}:\d{2}/g);
+    if (horarios && horarios.length >= 2) {
+      let dataStr = dataMatch[1];
+      // Normalizar ano de 2 dígitos para 4 dígitos
+      const partes = dataStr.split('/');
+      if (partes[2] && partes[2].length === 2) {
+        partes[2] = '20' + partes[2];
+        dataStr = partes.join('/');
+      }
+      ultimoDiaTrabalhado = dataStr;
     }
   }
 
@@ -121,19 +199,42 @@ function parseCartaoPonto(text) {
 function parseFichaFinanceira(text) {
   const result = {};
 
-  // Encontrar mes mais recente com valores
-  // Procurar por PERIODO 1 (adiantamento - cod 017)
-  // Procurar por PERIODO 2 (fechamento - cod 001 SALARIO BASE)
+  // Tentar encontrar o bloco do mês mais recente
+  // Estrutura: PERIODO 1 (adiantamento) e PERIODO 2 (fechamento)
+  // Cod 017 = adiantamento, Cod 001 = salário base
 
-  const adiantamentoMatch = text.match(/017[^\n]*\s+([\d.,]+)/);
-  if (adiantamentoMatch) {
-    result.adiantamento = parseFloat(adiantamentoMatch[1].replace(/\./g, '').replace(',', '.'));
+  // Adiantamento (cod 017) — exige BRL format
+  const adiantPatterns = [
+    /\b017\b[^\n]*([\d.]+,\d{2})(?!\d)/,
+    /ADIANTAMENTO[^\n]*([\d.]+,\d{2})(?!\d)/i,
+    /ADT\s+SAL[^\n]*([\d.]+,\d{2})(?!\d)/i,
+  ];
+  for (const pattern of adiantPatterns) {
+    const m = text.match(pattern);
+    if (m) {
+      const val = parseBRCurrency(m[1]);
+      if (val && val > 1) { // ignorar valores insignificantes
+        result.adiantamento = val;
+        break;
+      }
+    }
   }
 
-  // Salario base do fechamento
-  const salarioMatch = text.match(/001[^\n]*SAL[AÁ]RIO[^\n]*\s+([\d.,]+)/i);
-  if (salarioMatch) {
-    result.salario_base = parseFloat(salarioMatch[1].replace(/\./g, '').replace(',', '.'));
+  // Salário base (cod 001) — exige BRL format
+  const salarioPatterns = [
+    /\b001\b[^\n]*SAL[ÁA]RIO[^\n]*([\d.]+,\d{2})(?!\d)/i,
+    /SAL[ÁA]RIO\s+BASE[^\n]*([\d.]+,\d{2})(?!\d)/i,
+    /\b001\b[^\n]*([\d.]+,\d{2})(?!\d)/,
+  ];
+  for (const pattern of salarioPatterns) {
+    const m = text.match(pattern);
+    if (m) {
+      const val = parseBRCurrency(m[1]);
+      if (val && val > 1) {
+        result.salario_base = val;
+        break;
+      }
+    }
   }
 
   return result;
@@ -142,17 +243,20 @@ function parseFichaFinanceira(text) {
 function parseHistoricoFerias(text) {
   const result = {};
 
-  // Periodos aquisitivos sem data de gozo = ferias vencidas
   let periodos_vencidos = 0;
+  const linhas = text.split(/\r?\n/);
 
-  // Procurar por periodos sem data de gozo
-  const linhas = text.split('\n');
   for (const linha of linhas) {
-    const periodoMatch = linha.match(/(\d{2}\/\d{2}\/\d{4})\s+a\s+(\d{2}\/\d{2}\/\d{4})/i);
-    if (periodoMatch) {
-      // Verificar se tem data de gozo na mesma linha
-      const dataGozoMatch = linha.match(/(\d{2}\/\d{2}\/\d{4})\s+a\s+(\d{2}\/\d{2}\/\d{4}).*(\d{2}\/\d{2}\/\d{4})/);
-      if (!dataGozoMatch) {
+    // Linha com período aquisitivo: DD/MM/AAAA a DD/MM/AAAA
+    const periodoMatch = linha.match(/(\d{2}\/\d{2}\/\d{4})\s+[aA]\s+(\d{2}\/\d{2}\/\d{4})/);
+    if (!periodoMatch) continue;
+
+    // Contar datas na linha — se tiver 3 ou mais datas = tem data de gozo = não é vencida
+    const todasDatas = linha.match(/\d{2}\/\d{2}\/\d{4}/g) || [];
+    if (todasDatas.length < 3) {
+      // Verificar também se a linha contém "GOZO" ou "INICIO" de férias
+      const temGozo = /GOZO|INICIO|INÍCIO|FRUIÇÃO|FRUICAO/i.test(linha);
+      if (!temGozo) {
         periodos_vencidos++;
       }
     }

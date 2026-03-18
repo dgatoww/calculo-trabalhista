@@ -30,7 +30,8 @@ router.post('/:tipo', upload.single('file'), async (req, res) => {
     // Cleanup
     fs.unlinkSync(filePath);
 
-    res.json({ success: true, dados, texto_extraido: text.substring(0, 500) });
+    // Retorna texto completo para debug (primeiros 3000 chars)
+    res.json({ success: true, dados, texto_extraido: text.substring(0, 3000) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
