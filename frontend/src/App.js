@@ -1,202 +1,265 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import axios from 'axios';
 
 const API_URL = process.env.REACT_APP_API_URL || '';
 
-const formatCurrency = (value) => {
-  return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value || 0);
+const formatCurrency = (value) =>
+  new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value || 0);
+
+const TIPO_COLORS = {
+  ata: '#2d5da1',
+  movimentacoes: '#6a3fa0',
+  ponto: '#c07a00',
+  ficha: '#1a7a50',
+  ferias: '#a03030',
+};
+const TIPO_ICONS = {
+  ata: '⚖️',
+  movimentacoes: '📋',
+  ponto: '🕐',
+  ficha: '💰',
+  ferias: '🏖️',
 };
 
-function UploadCard({ tipo, titulo, descricao, onDataExtracted }) {
-  const [loading, setLoading] = useState(false);
-  const [status, setStatus] = useState('');
-  const [error, setError] = useState('');
+// ─── DROP ZONE ────────────────────────────────────────────────────────────────
+function DropZone({ onFilesUploaded, loading }) {
+  const [dragging, setDragging] = useState(false);
+  const inputRef = useRef();
 
-  const handleUpload = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    setLoading(true);
-    setError('');
-    setStatus('Extraindo dados...');
-
+  const processFiles = useCallback(async (files) => {
+    if (!files || files.length === 0) return;
     const formData = new FormData();
-    formData.append('file', file);
+    for (const file of files) formData.append('files', file);
+    onFilesUploaded(formData, files);
+  }, [onFilesUploaded]);
 
-    try {
-      const response = await axios.post(`${API_URL}/api/upload/${tipo}`, formData);
-      setStatus('Dados extraídos com sucesso!');
-      onDataExtracted(tipo, response.data.dados);
-    } catch (err) {
-      setError('Erro ao processar arquivo: ' + (err.response?.data?.error || err.message));
-      setStatus('');
-    } finally {
-      setLoading(false);
-    }
-  };
+  const onDrop = useCallback((e) => {
+    e.preventDefault();
+    setDragging(false);
+    processFiles(e.dataTransfer.files);
+  }, [processFiles]);
 
   return (
-    <div style={styles.card}>
-      <h3 style={styles.cardTitle}>{titulo}</h3>
-      <p style={styles.cardDesc}>{descricao}</p>
+    <div
+      onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+      onDragLeave={() => setDragging(false)}
+      onDrop={onDrop}
+      onClick={() => !loading && inputRef.current.click()}
+      style={{
+        border: `3px dashed ${dragging ? '#2d5da1' : '#aaa'}`,
+        borderRadius: 12,
+        padding: '40px 24px',
+        textAlign: 'center',
+        background: dragging ? '#eef3ff' : '#fafafa',
+        cursor: loading ? 'not-allowed' : 'pointer',
+        transition: 'all 0.2s',
+        marginBottom: 24,
+      }}
+    >
       <input
+        ref={inputRef}
         type="file"
         accept=".pdf"
-        onChange={handleUpload}
-        disabled={loading}
-        style={styles.fileInput}
+        multiple
+        style={{ display: 'none' }}
+        onChange={(e) => processFiles(e.target.files)}
       />
-      {loading && <p style={styles.loading}>Processando...</p>}
-      {status && <p style={styles.success}>{status}</p>}
-      {error && <p style={styles.error}>{error}</p>}
+      <div style={{ fontSize: 48 }}>{loading ? '⏳' : '📂'}</div>
+      <p style={{ fontWeight: 'bold', fontSize: '1.1em', margin: '8px 0 4px', color: '#333' }}>
+        {loading ? 'Processando arquivos...' : 'Arraste os PDFs aqui ou clique para selecionar'}
+      </p>
+      <p style={{ color: '#888', margin: 0, fontSize: '0.9em' }}>
+        Selecione todos os PDFs de uma vez — o sistema identifica automaticamente cada tipo de documento
+      </p>
     </div>
   );
 }
 
+// ─── FILE RESULT CARD ─────────────────────────────────────────────────────────
+function FileResultCard({ result }) {
+  const [showDebug, setShowDebug] = useState(false);
+  const cor = TIPO_COLORS[result.tipo] || '#666';
+  const icon = TIPO_ICONS[result.tipo] || '❓';
+
+  return (
+    <div style={{ border: `2px solid ${cor}`, borderRadius: 10, padding: 16, marginBottom: 12, background: '#fff' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>
+          <span style={{ fontSize: '1.2em' }}>{icon}</span>
+          <strong style={{ marginLeft: 8, color: cor }}>{result.tipo_label}</strong>
+          <span style={{ marginLeft: 8, color: '#888', fontSize: '0.85em' }}>{result.filename}</span>
+        </div>
+        {result.error
+          ? <span style={{ color: '#e74c3c', fontWeight: 'bold' }}>ERRO: {result.error}</span>
+          : <span style={{ color: '#27ae60' }}>✓ Extraído</span>
+        }
+      </div>
+
+      {/* Dados extraídos */}
+      {!result.error && (
+        <div style={{ marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          {Object.entries(result.dados || {}).map(([k, v]) => {
+            if (!v || k === '_debug' || (Array.isArray(v) && v.length === 0)) return null;
+            const label = k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+            const display = Array.isArray(v) ? `${v.length} registro(s)` : String(v);
+            return (
+              <span key={k} style={{ background: '#f0f4ff', padding: '4px 10px', borderRadius: 20, fontSize: '0.82em' }}>
+                <strong>{label}:</strong> {display.substring(0, 40)}
+              </span>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Debug toggle */}
+      <button
+        onClick={() => setShowDebug(!showDebug)}
+        style={{ marginTop: 10, background: 'none', border: '1px solid #ddd', borderRadius: 6, padding: '4px 12px', cursor: 'pointer', fontSize: '0.8em', color: '#666' }}
+      >
+        {showDebug ? '▲ Ocultar debug' : '▼ Ver debug / texto bruto'}
+      </button>
+
+      {showDebug && (
+        <div style={{ marginTop: 10, background: '#1e1e1e', color: '#d4d4d4', padding: 16, borderRadius: 8, fontSize: '0.78em', overflowX: 'auto' }}>
+          <p style={{ color: '#9cdcfe', margin: '0 0 8px', fontWeight: 'bold' }}>DADOS EXTRAÍDOS (MATCHES):</p>
+          <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>
+            {JSON.stringify(result.debug, null, 2)}
+          </pre>
+          <p style={{ color: '#9cdcfe', margin: '12px 0 8px', fontWeight: 'bold' }}>TEXTO BRUTO (primeiros 2000 chars):</p>
+          <pre style={{ margin: 0, whiteSpace: 'pre-wrap', color: '#ce9178' }}>
+            {result.raw_text}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── RESULTADO ────────────────────────────────────────────────────────────────
 function ResultadoCard({ resultado, dados }) {
   const handleDownload = async () => {
     try {
       const response = await axios.post(`${API_URL}/api/export/docx`,
-        { dados, resultado },
-        { responseType: 'blob' }
-      );
+        { dados, resultado }, { responseType: 'blob' });
       const url = window.URL.createObjectURL(new Blob([response.data]));
-      const link = document.createElement('a');
-      link.href = url;
-      link.setAttribute('download', `calculo_trabalhista.docx`);
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
+      const a = document.createElement('a');
+      a.href = url;
+      a.setAttribute('download', `calculo_trabalhista.docx`);
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
     } catch (err) {
       alert('Erro ao gerar documento: ' + err.message);
     }
   };
 
-  return (
-    <div style={styles.resultCard}>
-      <h2 style={styles.resultTitle}>RESULTADO DO CÁLCULO</h2>
+  const rows = [
+    { label: 'Saldo de Salário', base: `${resultado.saldo_salario.diasTrabalhados} dias${resultado.saldo_salario.adiantamento > 0 ? ` - ${formatCurrency(resultado.saldo_salario.adiantamento)} adiant.` : ''}`, valor: resultado.saldo_salario.valorLiquido },
+    { label: '13º Salário Prop.', base: `${resultado.decimo_terceiro.avos}/12 avos`, valor: resultado.decimo_terceiro.valor },
+    { label: 'Férias Vencidas', base: `${resultado.ferias_vencidas.periodos} período(s) × 1,3333`, valor: resultado.ferias_vencidas.valor },
+    { label: 'Férias Proporcionais', base: `${resultado.ferias_proporcionais.avos}/12 avos × 1,3333`, valor: resultado.ferias_proporcionais.valor },
+  ];
 
-      <table style={styles.table}>
+  return (
+    <div>
+      <h2 style={{ color: '#1a3a6b', textAlign: 'center', marginBottom: 24 }}>RESULTADO DO CÁLCULO</h2>
+      <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 20 }}>
         <thead>
-          <tr style={styles.tableHeader}>
-            <th style={styles.th}>Verba</th>
-            <th style={styles.th}>Base de Cálculo</th>
-            <th style={styles.th}>Valor</th>
+          <tr style={{ background: '#1a3a6b', color: 'white' }}>
+            {['Verba', 'Base de Cálculo', 'Valor'].map(h => (
+              <th key={h} style={{ padding: '12px 16px', textAlign: 'left' }}>{h}</th>
+            ))}
           </tr>
         </thead>
         <tbody>
-          <tr>
-            <td style={styles.td}>Saldo de Salário</td>
-            <td style={styles.td}>{resultado.saldo_salario.diasTrabalhados} dias {resultado.saldo_salario.adiantamento > 0 ? `(- ${formatCurrency(resultado.saldo_salario.adiantamento)} adiant.)` : ''}</td>
-            <td style={{...styles.td, ...styles.tdValue}}>{formatCurrency(resultado.saldo_salario.valorLiquido)}</td>
-          </tr>
-          <tr style={styles.trAlt}>
-            <td style={styles.td}>13º Salário Prop.</td>
-            <td style={styles.td}>{resultado.decimo_terceiro.avos}/12 avos</td>
-            <td style={{...styles.td, ...styles.tdValue}}>{formatCurrency(resultado.decimo_terceiro.valor)}</td>
-          </tr>
-          <tr>
-            <td style={styles.td}>Férias Vencidas</td>
-            <td style={styles.td}>{resultado.ferias_vencidas.periodos} período(s) × 1,3333</td>
-            <td style={{...styles.td, ...styles.tdValue}}>{formatCurrency(resultado.ferias_vencidas.valor)}</td>
-          </tr>
-          <tr style={styles.trAlt}>
-            <td style={styles.td}>Férias Proporcionais</td>
-            <td style={styles.td}>{resultado.ferias_proporcionais.avos}/12 avos × 1,3333</td>
-            <td style={{...styles.td, ...styles.tdValue}}>{formatCurrency(resultado.ferias_proporcionais.valor)}</td>
-          </tr>
-          <tr style={styles.trTotal}>
-            <td style={{...styles.td, fontWeight: 'bold'}} colSpan={2}>TOTAL GERAL</td>
-            <td style={{...styles.td, fontWeight: 'bold', fontSize: '1.2em', color: '#1a7a1a'}}>{formatCurrency(resultado.total)}</td>
+          {rows.map((r, i) => (
+            <tr key={r.label} style={{ background: i % 2 === 1 ? '#f9f9f9' : 'white' }}>
+              <td style={{ padding: '12px 16px', borderBottom: '1px solid #eee' }}>{r.label}</td>
+              <td style={{ padding: '12px 16px', borderBottom: '1px solid #eee', color: '#555' }}>{r.base}</td>
+              <td style={{ padding: '12px 16px', borderBottom: '1px solid #eee', fontWeight: 600, color: '#1a7a1a', textAlign: 'right' }}>{formatCurrency(r.valor)}</td>
+            </tr>
+          ))}
+          <tr style={{ background: '#e8f5e9' }}>
+            <td colSpan={2} style={{ padding: '14px 16px', fontWeight: 'bold', fontSize: '1.1em', borderTop: '3px solid #4CAF50' }}>TOTAL GERAL</td>
+            <td style={{ padding: '14px 16px', fontWeight: 'bold', fontSize: '1.2em', color: '#1a7a1a', textAlign: 'right', borderTop: '3px solid #4CAF50' }}>{formatCurrency(resultado.total)}</td>
           </tr>
         </tbody>
       </table>
-
-      <button onClick={handleDownload} style={styles.btnDownload}>
-        Exportar para Word (.docx)
-      </button>
+      <div style={{ textAlign: 'center' }}>
+        <button onClick={handleDownload} style={{ padding: '12px 32px', background: '#2d5da1', color: 'white', border: 'none', borderRadius: 8, cursor: 'pointer', fontSize: '1em', fontWeight: 'bold' }}>
+          ⬇ Exportar para Word (.docx)
+        </button>
+      </div>
     </div>
   );
 }
 
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
 export default function App() {
+  const [activeTab, setActiveTab] = useState('upload');
+  const [uploadLoading, setUploadLoading] = useState(false);
+  const [fileResults, setFileResults] = useState([]);
   const [formData, setFormData] = useState({
-    nome_reclamante: '',
-    nome_reclamada: '',
-    numero_processo: '',
-    data_admissao: '',
-    data_rescisao: '',
-    ultimo_dia_trabalhado: '',
-    salario: '',
-    adiantamento: '0',
-    ferias_vencidas_periodos: '0',
+    nome_reclamante: '', nome_reclamada: '', numero_processo: '',
+    data_admissao: '', data_rescisao: '', ultimo_dia_trabalhado: '',
+    salario: '', adiantamento: '0', ferias_vencidas_periodos: '0',
     afastamentos: []
   });
-
   const [resultado, setResultado] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [newAfastamento, setNewAfastamento] = useState({ tipo: 'beneficio_comum', inicio: '', fim: '' });
-  const [activeTab, setActiveTab] = useState('upload');
+  const [calcLoading, setCalcLoading] = useState(false);
+  const [calcError, setCalcError] = useState('');
+  const [newAfast, setNewAfast] = useState({ tipo: 'beneficio_comum', inicio: '', fim: '' });
 
-  const handleDataExtracted = useCallback((tipo, dados) => {
-    setFormData(prev => {
-      const updated = { ...prev };
-      switch (tipo) {
-        case 'ata':
-          if (dados.nome_reclamante) updated.nome_reclamante = dados.nome_reclamante;
-          if (dados.nome_reclamada) updated.nome_reclamada = dados.nome_reclamada;
-          if (dados.numero_processo) updated.numero_processo = dados.numero_processo;
-          if (dados.data_rescisao) updated.data_rescisao = dados.data_rescisao;
-          if (dados.data_admissao && !updated.data_admissao) updated.data_admissao = dados.data_admissao;
-          break;
-        case 'movimentacoes':
-          if (dados.nome) updated.nome_reclamante = dados.nome;
-          if (dados.data_admissao) updated.data_admissao = dados.data_admissao;
-          if (dados.salario) updated.salario = String(dados.salario);
-          if (dados.afastamentos && dados.afastamentos.length > 0) {
-            updated.afastamentos = [...(prev.afastamentos || []), ...dados.afastamentos];
+  const handleFilesUploaded = useCallback(async (formDataObj) => {
+    setUploadLoading(true);
+    setFileResults([]);
+    try {
+      const resp = await axios.post(`${API_URL}/api/upload/auto`, formDataObj, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+      setFileResults(resp.data.results);
+
+      // Preencher formulário com dados mesclados
+      const merged = resp.data.mergedData;
+      if (merged) {
+        setFormData(prev => {
+          const upd = { ...prev };
+          const fields = ['nome_reclamante', 'nome_reclamada', 'numero_processo',
+            'data_admissao', 'data_rescisao', 'ultimo_dia_trabalhado', 'salario'];
+          for (const f of fields) {
+            if (merged[f] && !upd[f]) upd[f] = String(merged[f]);
           }
-          break;
-        case 'ponto':
-          if (dados.ultimo_dia_trabalhado) updated.ultimo_dia_trabalhado = dados.ultimo_dia_trabalhado;
-          break;
-        case 'ficha':
-          if (dados.adiantamento) updated.adiantamento = String(dados.adiantamento);
-          if (dados.salario_base && !updated.salario) updated.salario = String(dados.salario_base);
-          break;
-        case 'ferias':
-          if (dados.ferias_vencidas_periodos !== undefined) updated.ferias_vencidas_periodos = String(dados.ferias_vencidas_periodos);
-          break;
-        default: break;
+          // Sobrescrever mesmo se existir para esses campos
+          if (merged.salario) upd.salario = String(merged.salario);
+          if (merged.adiantamento) upd.adiantamento = String(merged.adiantamento);
+          if (merged.ferias_vencidas_periodos !== undefined) upd.ferias_vencidas_periodos = String(merged.ferias_vencidas_periodos);
+          if (merged.afastamentos && merged.afastamentos.length > 0) {
+            upd.afastamentos = [...(prev.afastamentos || []), ...merged.afastamentos];
+          }
+          return upd;
+        });
       }
-      return updated;
-    });
+    } catch (err) {
+      alert('Erro ao processar arquivos: ' + (err.response?.data?.error || err.message));
+    } finally {
+      setUploadLoading(false);
+    }
   }, []);
 
-  const handleChange = (e) => {
-    setFormData(prev => ({ ...prev, [e.target.name]: e.target.value }));
+  const handleChange = (e) => setFormData(prev => ({ ...prev, [e.target.name]: e.target.value }));
+
+  const addAfast = () => {
+    if (!newAfast.inicio || !newAfast.fim) return;
+    setFormData(prev => ({ ...prev, afastamentos: [...(prev.afastamentos || []), { ...newAfast }] }));
+    setNewAfast({ tipo: 'beneficio_comum', inicio: '', fim: '' });
   };
 
-  const addAfastamento = () => {
-    if (!newAfastamento.inicio || !newAfastamento.fim) return;
-    setFormData(prev => ({
-      ...prev,
-      afastamentos: [...(prev.afastamentos || []), { ...newAfastamento }]
-    }));
-    setNewAfastamento({ tipo: 'beneficio_comum', inicio: '', fim: '' });
-  };
-
-  const removeAfastamento = (idx) => {
-    setFormData(prev => ({
-      ...prev,
-      afastamentos: prev.afastamentos.filter((_, i) => i !== idx)
-    }));
-  };
+  const removeAfast = (i) =>
+    setFormData(prev => ({ ...prev, afastamentos: prev.afastamentos.filter((_, idx) => idx !== i) }));
 
   const handleCalcular = async () => {
-    setLoading(true);
-    setError('');
+    setCalcLoading(true);
+    setCalcError('');
     try {
       const payload = {
         ...formData,
@@ -204,178 +267,169 @@ export default function App() {
         adiantamento: parseFloat(String(formData.adiantamento).replace(',', '.')) || 0,
         ferias_vencidas_periodos: parseInt(formData.ferias_vencidas_periodos) || 0,
       };
-      const response = await axios.post(`${API_URL}/api/calculos/calcular`, payload);
-      setResultado(response.data.resultado);
+      const resp = await axios.post(`${API_URL}/api/calculos/calcular`, payload);
+      setResultado(resp.data.resultado);
       setActiveTab('resultado');
     } catch (err) {
-      setError('Erro ao calcular: ' + (err.response?.data?.error || err.message));
+      setCalcError('Erro: ' + (err.response?.data?.error || err.message));
     } finally {
-      setLoading(false);
+      setCalcLoading(false);
     }
   };
 
-  const inputStyle = (name) => ({
-    ...styles.input,
-    borderColor: formData[name] ? '#4CAF50' : '#ddd'
+  const preenchido = (name) => !!formData[name];
+  const inp = (extra = {}) => ({
+    padding: '8px 12px', border: '2px solid #ddd', borderRadius: 6,
+    fontSize: '0.95em', outline: 'none', width: '100%', boxSizing: 'border-box', ...extra
   });
 
+  const FIELDS = [
+    { name: 'numero_processo', label: 'Número do Processo', ph: '0000000-00.0000.0.00.0000' },
+    { name: 'nome_reclamante', label: 'Reclamante', ph: 'Nome completo' },
+    { name: 'nome_reclamada', label: 'Reclamada', ph: 'Razão social' },
+    { name: 'data_admissao', label: 'Data de Admissão', ph: 'DD/MM/AAAA' },
+    { name: 'data_rescisao', label: 'Data de Rescisão', ph: 'DD/MM/AAAA' },
+    { name: 'ultimo_dia_trabalhado', label: 'Último Dia Trabalhado', ph: 'DD/MM/AAAA' },
+    { name: 'salario', label: 'Salário (R$)', ph: '1780.00' },
+    { name: 'adiantamento', label: 'Adiantamento (R$)', ph: '0.00' },
+    { name: 'ferias_vencidas_periodos', label: 'Períodos de Férias Vencidas', ph: '0' },
+  ];
+
   return (
-    <div style={styles.app}>
-      <header style={styles.header}>
-        <h1 style={styles.headerTitle}>Cálculo de Verbas Rescisórias</h1>
-        <p style={styles.headerSub}>Sistema automatizado para cálculo trabalhista</p>
+    <div style={{ fontFamily: 'Arial, sans-serif', maxWidth: 1100, margin: '0 auto', padding: '0 16px' }}>
+      <header style={{ background: 'linear-gradient(135deg, #1a3a6b, #2d5da1)', color: 'white', padding: '24px', borderRadius: '0 0 12px 12px', marginBottom: 24, textAlign: 'center' }}>
+        <h1 style={{ margin: 0, fontSize: '1.8em' }}>⚖️ Cálculo de Verbas Rescisórias</h1>
+        <p style={{ margin: '8px 0 0', opacity: 0.85 }}>Sistema automatizado para cálculo trabalhista</p>
       </header>
 
-      <div style={styles.tabs}>
-        {['upload', 'dados', 'resultado'].map(tab => (
-          <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            style={{ ...styles.tab, ...(activeTab === tab ? styles.tabActive : {}) }}
-          >
-            {tab === 'upload' ? 'Upload PDFs' : tab === 'dados' ? 'Dados' : 'Resultado'}
-          </button>
+      {/* Tabs */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 24 }}>
+        {[
+          { id: 'upload', label: '📄 Upload PDFs' },
+          { id: 'dados', label: '📝 Dados' },
+          { id: 'resultado', label: '📊 Resultado' },
+        ].map(({ id, label }) => (
+          <button key={id} onClick={() => setActiveTab(id)} style={{
+            padding: '10px 20px', border: '2px solid', borderRadius: 8,
+            cursor: 'pointer', fontWeight: 600,
+            borderColor: activeTab === id ? '#2d5da1' : '#ddd',
+            color: activeTab === id ? '#2d5da1' : '#555',
+            background: activeTab === id ? '#eef3ff' : 'white',
+          }}>{label}</button>
         ))}
       </div>
 
-      <div style={styles.content}>
+      <div style={{ background: 'white', padding: 24, borderRadius: 12, boxShadow: '0 2px 8px rgba(0,0,0,0.08)' }}>
+
+        {/* UPLOAD TAB */}
         {activeTab === 'upload' && (
           <div>
-            <p style={styles.hint}>Faça upload dos documentos para extração automática dos dados. Todos os campos são preenchidos automaticamente.</p>
-            <div style={styles.grid}>
-              <UploadCard tipo="ata" titulo="Ata de Audiência" descricao="PDF do PJe/TRT com dados do processo, reclamante e data de rescisão" onDataExtracted={handleDataExtracted} />
-              <UploadCard tipo="movimentacoes" titulo="Hist. Movimentações" descricao="Relatório 11.003 com salário, cargo e afastamentos" onDataExtracted={handleDataExtracted} />
-              <UploadCard tipo="ponto" titulo="Cartão de Ponto" descricao="Registros de ponto para identificar o último dia trabalhado" onDataExtracted={handleDataExtracted} />
-              <UploadCard tipo="ficha" titulo="Ficha Financeira" descricao="Relatório 11.013 com adiantamentos e salário base" onDataExtracted={handleDataExtracted} />
-              <UploadCard tipo="ferias" titulo="Hist. de Férias" descricao="Relatório 11.004 com períodos aquisitivos de férias" onDataExtracted={handleDataExtracted} />
+            <div style={{ background: '#f0f4ff', border: '1px solid #c5d5f5', borderRadius: 8, padding: '12px 16px', marginBottom: 20, fontSize: '0.9em', color: '#2d4a8a' }}>
+              <strong>Como usar:</strong> Selecione ou arraste <strong>todos os PDFs de uma vez</strong> — ata de audiência, cartão de ponto, ficha financeira, histórico de movimentações e histórico de férias. O sistema detecta automaticamente o tipo de cada documento.
             </div>
-            <div style={styles.nextBtn}>
-              <button onClick={() => setActiveTab('dados')} style={styles.btnPrimary}>Continuar - Revisar Dados</button>
-            </div>
+
+            <DropZone onFilesUploaded={handleFilesUploaded} loading={uploadLoading} />
+
+            {uploadLoading && (
+              <div style={{ textAlign: 'center', padding: 20, color: '#2d5da1' }}>
+                <div style={{ fontSize: 32 }}>⏳</div>
+                <p>Extraindo dados dos PDFs...</p>
+              </div>
+            )}
+
+            {fileResults.length > 0 && (
+              <div>
+                <h3 style={{ color: '#1a3a6b', marginBottom: 12 }}>
+                  {fileResults.length} arquivo(s) processado(s)
+                </h3>
+                {fileResults.map((r, i) => <FileResultCard key={i} result={r} />)}
+                <div style={{ textAlign: 'center', marginTop: 20 }}>
+                  <button onClick={() => setActiveTab('dados')} style={{ padding: '12px 32px', background: '#2d5da1', color: 'white', border: 'none', borderRadius: 8, cursor: 'pointer', fontSize: '1em', fontWeight: 'bold' }}>
+                    Revisar Dados →
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
+        {/* DADOS TAB */}
         {activeTab === 'dados' && (
           <div>
-            <h2 style={styles.sectionTitle}>Dados do Processo</h2>
-            <div style={styles.formGrid}>
-              {[
-                { name: 'numero_processo', label: 'Número do Processo', placeholder: '0000000-00.0000.0.00.0000' },
-                { name: 'nome_reclamante', label: 'Reclamante', placeholder: 'Nome completo' },
-                { name: 'nome_reclamada', label: 'Reclamada', placeholder: 'Razão social' },
-                { name: 'data_admissao', label: 'Data de Admissão', placeholder: 'DD/MM/AAAA' },
-                { name: 'data_rescisao', label: 'Data de Rescisão', placeholder: 'DD/MM/AAAA' },
-                { name: 'ultimo_dia_trabalhado', label: 'Último Dia Trabalhado', placeholder: 'DD/MM/AAAA' },
-                { name: 'salario', label: 'Salário (R$)', placeholder: '1780.00' },
-                { name: 'adiantamento', label: 'Adiantamento (R$)', placeholder: '0.00' },
-                { name: 'ferias_vencidas_periodos', label: 'Períodos de Férias Vencidas', placeholder: '0' },
-              ].map(field => (
-                <div key={field.name} style={styles.formGroup}>
-                  <label style={styles.label}>{field.label}</label>
+            <h2 style={{ color: '#1a3a6b', borderBottom: '2px solid #eee', paddingBottom: 8 }}>Dados do Processo</h2>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 16, marginBottom: 24 }}>
+              {FIELDS.map(({ name, label, ph }) => (
+                <div key={name}>
+                  <label style={{ display: 'block', fontWeight: 600, color: '#333', fontSize: '0.9em', marginBottom: 4 }}>
+                    {label} {preenchido(name) && <span style={{ color: '#27ae60' }}>✓</span>}
+                  </label>
                   <input
-                    name={field.name}
-                    value={formData[field.name]}
-                    onChange={handleChange}
-                    placeholder={field.placeholder}
-                    style={inputStyle(field.name)}
+                    name={name} value={formData[name]} onChange={handleChange} placeholder={ph}
+                    style={inp({ borderColor: preenchido(name) ? '#4CAF50' : '#ddd' })}
                   />
                 </div>
               ))}
             </div>
 
-            <h2 style={styles.sectionTitle}>Afastamentos</h2>
-            <p style={styles.hint}>AUX.DOENÇA não conta para avos. LIC.MATERNIDADE conta para avos.</p>
+            <h2 style={{ color: '#1a3a6b', borderBottom: '2px solid #eee', paddingBottom: 8 }}>Afastamentos</h2>
+            <p style={{ color: '#666', background: '#fff8e1', padding: '8px 12px', borderRadius: 6, fontSize: '0.9em', marginBottom: 12 }}>
+              🏥 <strong>AUX.DOENÇA</strong> — não conta para avos &nbsp;|&nbsp; 👶 <strong>LIC.MATERNIDADE</strong> — conta para avos
+            </p>
 
-            <div style={styles.afastGrid}>
-              <select value={newAfastamento.tipo} onChange={e => setNewAfastamento(p => ({...p, tipo: e.target.value}))} style={styles.select}>
-                <option value="beneficio_comum">AUX.DOENÇA (não conta avos)</option>
-                <option value="licenca_maternidade">LIC.MATERNIDADE (conta avos)</option>
-              </select>
-              <input type="text" placeholder="Início DD/MM/AAAA" value={newAfastamento.inicio} onChange={e => setNewAfastamento(p => ({...p, inicio: e.target.value}))} style={styles.input} />
-              <input type="text" placeholder="Fim DD/MM/AAAA" value={newAfastamento.fim} onChange={e => setNewAfastamento(p => ({...p, fim: e.target.value}))} style={styles.input} />
-              <button onClick={addAfastamento} style={styles.btnAdd}>+ Adicionar</button>
+            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr auto', gap: 8, marginBottom: 16, alignItems: 'end' }}>
+              <div>
+                <label style={{ display: 'block', fontSize: '0.85em', fontWeight: 600, marginBottom: 4 }}>Tipo</label>
+                <select value={newAfast.tipo} onChange={e => setNewAfast(p => ({ ...p, tipo: e.target.value }))} style={inp()}>
+                  <option value="beneficio_comum">🏥 AUX.DOENÇA</option>
+                  <option value="licenca_maternidade">👶 LIC.MATERNIDADE</option>
+                </select>
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: '0.85em', fontWeight: 600, marginBottom: 4 }}>Início</label>
+                <input placeholder="DD/MM/AAAA" value={newAfast.inicio} onChange={e => setNewAfast(p => ({ ...p, inicio: e.target.value }))} style={inp()} />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: '0.85em', fontWeight: 600, marginBottom: 4 }}>Fim</label>
+                <input placeholder="DD/MM/AAAA" value={newAfast.fim} onChange={e => setNewAfast(p => ({ ...p, fim: e.target.value }))} style={inp()} />
+              </div>
+              <button onClick={addAfast} style={{ padding: '8px 16px', background: '#2d5da1', color: 'white', border: 'none', borderRadius: 6, cursor: 'pointer', height: 38 }}>+ Add</button>
             </div>
 
-            {formData.afastamentos && formData.afastamentos.length > 0 && (
-              <div style={styles.afastList}>
-                {formData.afastamentos.map((af, idx) => (
-                  <div key={idx} style={styles.afastItem}>
-                    <span style={{ color: af.tipo === 'beneficio_comum' ? '#e67e22' : '#27ae60' }}>
-                      {af.tipo === 'beneficio_comum' ? 'AUX.DOENÇA' : 'LIC.MATERNIDADE'}
+            {formData.afastamentos?.length > 0 && (
+              <div style={{ marginBottom: 24 }}>
+                {formData.afastamentos.map((af, i) => (
+                  <div key={i} style={{ display: 'flex', gap: 12, alignItems: 'center', padding: '10px 14px', background: '#f9f9f9', borderRadius: 8, border: '1px solid #eee', marginBottom: 8 }}>
+                    <span style={{ color: af.tipo === 'beneficio_comum' ? '#c0700a' : '#1a7a50', fontWeight: 600 }}>
+                      {af.tipo === 'beneficio_comum' ? '🏥 AUX.DOENÇA' : '👶 LIC.MATERNIDADE'}
                     </span>
-                    <span>{af.inicio} a {af.fim}</span>
-                    <button onClick={() => removeAfastamento(idx)} style={styles.btnRemove}>X</button>
+                    <span style={{ color: '#555' }}>{af.inicio} → {af.fim}</span>
+                    <button onClick={() => removeAfast(i)} style={{ marginLeft: 'auto', background: '#e74c3c', color: 'white', border: 'none', borderRadius: 4, padding: '4px 10px', cursor: 'pointer' }}>✕</button>
                   </div>
                 ))}
               </div>
             )}
 
-            {error && <p style={styles.error}>{error}</p>}
+            {calcError && <p style={{ color: '#e74c3c', background: '#fef', padding: '10px 14px', borderRadius: 6 }}>{calcError}</p>}
 
-            <div style={styles.nextBtn}>
-              <button onClick={handleCalcular} disabled={loading} style={styles.btnCalc}>
-                {loading ? 'Calculando...' : 'CALCULAR VERBAS'}
+            <div style={{ textAlign: 'center', marginTop: 8 }}>
+              <button onClick={handleCalcular} disabled={calcLoading} style={{ padding: '14px 48px', background: '#1a7a1a', color: 'white', border: 'none', borderRadius: 8, cursor: 'pointer', fontSize: '1.1em', fontWeight: 'bold', opacity: calcLoading ? 0.7 : 1 }}>
+                {calcLoading ? '⏳ Calculando...' : '🧮 CALCULAR VERBAS'}
               </button>
             </div>
           </div>
         )}
 
+        {/* RESULTADO TAB */}
         {activeTab === 'resultado' && resultado && (
           <ResultadoCard resultado={resultado} dados={formData} />
         )}
-
         {activeTab === 'resultado' && !resultado && (
-          <div style={styles.emptyResult}>
-            <p>Nenhum cálculo realizado ainda.</p>
-            <button onClick={() => setActiveTab('dados')} style={styles.btnPrimary}>Ir para Dados</button>
+          <div style={{ textAlign: 'center', padding: 40, color: '#888' }}>
+            <p style={{ fontSize: '1.1em' }}>Nenhum cálculo realizado ainda.</p>
+            <button onClick={() => setActiveTab('dados')} style={{ padding: '12px 32px', background: '#2d5da1', color: 'white', border: 'none', borderRadius: 8, cursor: 'pointer' }}>Ir para Dados</button>
           </div>
         )}
       </div>
     </div>
   );
 }
-
-const styles = {
-  app: { fontFamily: 'Arial, sans-serif', maxWidth: '1100px', margin: '0 auto', padding: '0 16px' },
-  header: { background: 'linear-gradient(135deg, #1a3a6b, #2d5da1)', color: 'white', padding: '24px', borderRadius: '0 0 12px 12px', marginBottom: '24px', textAlign: 'center' },
-  headerTitle: { margin: 0, fontSize: '1.8em' },
-  headerSub: { margin: '8px 0 0', opacity: 0.85 },
-  tabs: { display: 'flex', gap: '8px', marginBottom: '24px' },
-  tab: { padding: '10px 20px', border: '2px solid #ddd', borderRadius: '8px', background: 'white', cursor: 'pointer', fontWeight: '600', color: '#555' },
-  tabActive: { borderColor: '#2d5da1', color: '#2d5da1', background: '#eef3ff' },
-  content: { background: 'white', padding: '24px', borderRadius: '12px', boxShadow: '0 2px 8px rgba(0,0,0,0.08)' },
-  grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '16px' },
-  card: { border: '2px dashed #ccc', borderRadius: '8px', padding: '16px', background: '#fafafa' },
-  cardTitle: { margin: '0 0 8px', color: '#1a3a6b' },
-  cardDesc: { color: '#666', fontSize: '0.85em', margin: '0 0 12px' },
-  fileInput: { width: '100%' },
-  loading: { color: '#2d5da1', fontSize: '0.9em' },
-  success: { color: '#27ae60', fontSize: '0.9em', fontWeight: 'bold' },
-  error: { color: '#e74c3c', fontSize: '0.9em', padding: '8px', background: '#fef', borderRadius: '4px', margin: '8px 0' },
-  hint: { color: '#666', background: '#f0f4ff', padding: '10px', borderRadius: '6px', marginBottom: '16px' },
-  nextBtn: { textAlign: 'center', marginTop: '24px' },
-  btnPrimary: { padding: '12px 32px', background: '#2d5da1', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontSize: '1em' },
-  btnCalc: { padding: '14px 40px', background: '#1a7a1a', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontSize: '1.1em', fontWeight: 'bold' },
-  sectionTitle: { color: '#1a3a6b', borderBottom: '2px solid #eee', paddingBottom: '8px' },
-  formGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '16px', marginBottom: '24px' },
-  formGroup: { display: 'flex', flexDirection: 'column', gap: '4px' },
-  label: { fontWeight: '600', color: '#333', fontSize: '0.9em' },
-  input: { padding: '8px 12px', border: '2px solid #ddd', borderRadius: '6px', fontSize: '0.95em', outline: 'none' },
-  select: { padding: '8px 12px', border: '2px solid #ddd', borderRadius: '6px', fontSize: '0.95em' },
-  afastGrid: { display: 'grid', gridTemplateColumns: '2fr 1fr 1fr auto', gap: '8px', marginBottom: '16px', alignItems: 'center' },
-  btnAdd: { padding: '8px 16px', background: '#2d5da1', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer' },
-  afastList: { display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '24px' },
-  afastItem: { display: 'flex', gap: '16px', alignItems: 'center', padding: '10px', background: '#f9f9f9', borderRadius: '6px', border: '1px solid #eee' },
-  btnRemove: { marginLeft: 'auto', background: '#e74c3c', color: 'white', border: 'none', borderRadius: '4px', padding: '4px 10px', cursor: 'pointer' },
-  resultCard: { padding: '8px' },
-  resultTitle: { color: '#1a3a6b', textAlign: 'center', marginBottom: '24px' },
-  table: { width: '100%', borderCollapse: 'collapse', marginBottom: '24px' },
-  tableHeader: { background: '#1a3a6b', color: 'white' },
-  th: { padding: '12px', textAlign: 'left', fontWeight: 'bold' },
-  td: { padding: '12px', borderBottom: '1px solid #eee' },
-  tdValue: { fontWeight: '600', color: '#1a7a1a', textAlign: 'right' },
-  trAlt: { background: '#f9f9f9' },
-  trTotal: { background: '#e8f5e9', borderTop: '3px solid #4CAF50' },
-  btnDownload: { display: 'block', margin: '0 auto', padding: '12px 32px', background: '#2d5da1', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontSize: '1em', fontWeight: 'bold' },
-  emptyResult: { textAlign: 'center', padding: '40px', color: '#666' },
-};
