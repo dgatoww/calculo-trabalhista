@@ -339,7 +339,7 @@ export default function CalculationResult({ caseData, setLoading, setLoadingMess
     );
   }
 
-  const { employee_data, calculations, summary, formatted } = calculation;
+  const { employee_data, calculations, summary } = calculation;
 
   const summaryItems = [
     { key: 'saldo_salario', label: 'Saldo de Salário', value: summary?.saldo_salario },

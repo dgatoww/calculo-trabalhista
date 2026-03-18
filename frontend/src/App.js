@@ -149,7 +149,6 @@ function App() {
   const [activeTab, setActiveTab] = useState('upload');
   const [loading, setLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState('');
-  const [cases, setCases] = useState([]);
   const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
