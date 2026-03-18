@@ -264,7 +264,7 @@ export default function CalculationResult({ caseData, setLoading, setLoadingMess
 
   useEffect(() => {
     loadCalculation();
-  }, [caseData?.id]);
+  }, [caseData?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadCalculation = async () => {
     setLoadingCalc(true);
