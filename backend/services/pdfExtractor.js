@@ -163,7 +163,10 @@ function extractAtaAudiencia(text) {
   // Reclamante
   const reclamanteMatch = text.match(/RECLAMANTE:\s*(.+)/i);
   if (reclamanteMatch) {
-    fields.nome_reclamante = reclamanteMatch[1].trim().split('\n')[0].trim();
+    let nome = reclamanteMatch[1].trim().split('\n')[0].trim();
+    // Remove trailing date (DD/MM/YYYY or DD.MM.YYYY) and anything after it
+    nome = nome.replace(/\s*\d{2}[\/\.\-]\d{2}[\/\.\-]\d{4}.*$/, '').trim();
+    fields.nome_reclamante = nome;
   }
 
   // Reclamado(a)
@@ -215,8 +218,8 @@ function extractHistoricoMovimentacoes(text) {
     fields.funcao = cargoMatch[1].trim().split('\n')[0].trim();
   }
 
-  // Salário: find "HISTORICO DE MUDANCA DE SALARIO" section, get LAST monetary value
-  const salarioSectionIdx = text.search(/HISTORICO\s+DE\s+MUDANCA\s+DE\s+SALARIO/i);
+  // Salário: find "HISTORICO DE MUDANÇA DE SALARIO" section, get LAST monetary value
+  const salarioSectionIdx = text.search(/HISTORICO\s+DE\s+MUDAN[CÇ]A\s+DE\s+SAL[AÁ]RIO/i);
   if (salarioSectionIdx !== -1) {
     // Find next section header or end of text
     const afterSection = text.slice(salarioSectionIdx);
@@ -353,6 +356,7 @@ function extractCartaoPonto(text) {
   let currentMonth = null;
   let currentYear = null;
   let lastValidDate = null;
+  let pendingDate = null; // date found on a line without times — check next line for times
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -365,34 +369,52 @@ function extractCartaoPonto(text) {
     if (namedMonthHeader) {
       currentMonth = monthNames[namedMonthHeader[1].toLowerCase()];
       currentYear = namedMonthHeader[2];
+      pendingDate = null;
       continue;
     }
     const numericMonthHeader = trimmed.match(/^(\d{2})[\/\-](\d{4})$/);
     if (numericMonthHeader) {
       currentMonth = numericMonthHeader[1];
       currentYear = numericMonthHeader[2];
+      pendingDate = null;
       continue;
     }
 
     // Skip lines with ignore keywords
     if (IGNORE_KEYWORDS.some(kw => upper.includes(kw))) continue;
 
-    // Check for ≥2 time patterns (HH:MM)
     const times = trimmed.match(/\d{2}:\d{2}/g);
-    if (!times || times.length < 2) continue;
-
-    // Try full date in line
     const fullDateMatch = trimmed.match(/(\d{2})[\/\-\.](\d{2})[\/\-\.](\d{4})/);
+
     if (fullDateMatch) {
-      lastValidDate = `${fullDateMatch[3]}-${fullDateMatch[2]}-${fullDateMatch[1]}`;
+      const dateStr = `${fullDateMatch[3]}-${fullDateMatch[2]}-${fullDateMatch[1]}`;
+      if (times && times.length >= 2) {
+        // Date and times on the same line → confirmed worked day
+        lastValidDate = dateStr;
+        pendingDate = null;
+      } else {
+        // Date alone — times may be on the next line
+        pendingDate = dateStr;
+      }
       continue;
     }
 
-    // Try day-only at start of line (e.g., "07 08:00 12:00 ...")
-    const dayOnlyMatch = trimmed.match(/^(\d{1,2})\s/);
-    if (dayOnlyMatch && currentMonth && currentYear) {
-      const day = dayOnlyMatch[1].padStart(2, '0');
-      lastValidDate = `${currentYear}-${currentMonth}-${day}`;
+    if (times && times.length >= 2) {
+      if (pendingDate) {
+        // Times on the line immediately after a date-only line
+        lastValidDate = pendingDate;
+        pendingDate = null;
+      } else {
+        // Day-only at start of line (e.g., "07 08:00 12:00 ...")
+        const dayOnlyMatch = trimmed.match(/^(\d{1,2})\s/);
+        if (dayOnlyMatch && currentMonth && currentYear) {
+          const day = dayOnlyMatch[1].padStart(2, '0');
+          lastValidDate = `${currentYear}-${currentMonth}-${day}`;
+        }
+      }
+    } else {
+      // Line with no times and no full date — reset pending
+      if (!fullDateMatch) pendingDate = null;
     }
   }
 
@@ -437,7 +459,7 @@ function extractFichaFinanceira(text) {
     if (monthNameMatch) {
       const m = monthNames[monthNameMatch[1].toLowerCase()];
       currentKey = `${monthNameMatch[2]}-${m}`;
-      currentPeriod = null;
+      currentPeriod = 1; // default to period 1 until explicit "PERIODO 2" marker
       if (!months[currentKey]) months[currentKey] = { p1: {}, p2: {} };
       continue;
     }
@@ -542,14 +564,19 @@ function extractHistoricoFerias(text) {
   // Find the section with aquisitive periods
   let inPeriodSection = false;
   for (const line of lines) {
-    const upper = line.toUpperCase();
-
-    // Detect section header
-    if (/PER[IÍ]ODO\s+AQUISITIVO/i.test(line) || /FERIAS/i.test(line)) {
+    // Activate section only on explicit period/férias headers
+    if (/PER[IÍ]ODO\s+AQUISITIVO/i.test(line) ||
+        /HIST[OÓ]RICO\s+DE\s+F[EÉ]RIAS/i.test(line) ||
+        /REL.*11\.004/i.test(line)) {
       inPeriodSection = true;
+      continue;
     }
 
     if (!inPeriodSection) continue;
+
+    // Skip column-header lines (no real dates, just labels)
+    if (/\b(IN[IÍ]CIO|FIM|AQUISITIVO|GOZO|DIAS|COD|PER[IÍ]ODO)\b/i.test(line) &&
+        !(/\d{2}\/\d{2}\/\d{4}/.test(line))) continue;
 
     const datesInLine = [...line.matchAll(/(\d{2}\/\d{2}\/\d{4})/g)];
     if (datesInLine.length < 2) continue;
