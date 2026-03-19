@@ -25,6 +25,10 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 // Serve uploaded files
 app.use('/uploads', express.static(uploadsDir));
 
+// Serve React frontend
+const frontendBuild = path.join(__dirname, '..', 'frontend', 'build');
+app.use(express.static(frontendBuild));
+
 // Initialize database
 const db = require('./database/db');
 
@@ -38,12 +42,13 @@ app.use('/api/cases', uploadRouter);
 app.use('/api/cases', calculateRouter);
 
 // Health check
-app.get('/', (req, res) => {
-  res.status(200).json({ status: 'ok' });
-});
-
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Catch-all: serve React app for any non-API route
+app.get('*', (req, res) => {
+  res.sendFile(path.join(frontendBuild, 'index.html'));
 });
 
 // Global error handler
