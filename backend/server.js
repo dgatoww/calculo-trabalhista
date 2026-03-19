@@ -4,7 +4,7 @@ const path = require('path');
 const fs = require('fs');
 
 const app = express();
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
 
 // Ensure uploads directory exists
 const uploadsDir = path.join(__dirname, 'uploads');
@@ -38,6 +38,10 @@ app.use('/api/cases', uploadRouter);
 app.use('/api/cases', calculateRouter);
 
 // Health check
+app.get('/', (req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
@@ -53,7 +57,6 @@ app.use((err, req, res, next) => {
 
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
-  console.log(`Acesse: http://localhost:${PORT}`);
 });
 
 module.exports = app;
