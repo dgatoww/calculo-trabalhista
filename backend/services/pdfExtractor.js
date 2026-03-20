@@ -199,17 +199,27 @@ function extractHistoricoMovimentacoes(text) {
   const fields = {};
   const lines = text.split('\n');
 
-  // Nome
+  // Nome — strip trailing date that pdf-parse concatenates: "SAMARA ROCHA DE AVIZ04/06/2024"
+  // Also capture that date as data_admissao since the PDF merges both into one line
   const nomeMatch = text.match(/NOME:\s*(.+)/i);
   if (nomeMatch) {
-    fields.nome_reclamante = nomeMatch[1].trim().split('\n')[0].trim();
+    const nomeLine = nomeMatch[1].trim().split('\n')[0].trim();
+    const dateInNome = nomeLine.match(/(\d{2}\/\d{2}\/\d{4})/);
+    fields.nome_reclamante = nomeLine.replace(/\s*\d{2}\/\d{2}\/\d{4}.*$/, '').trim();
+    if (dateInNome && !fields.data_admissao) {
+      const parsed = parseBrazilianDate(dateInNome[1]);
+      if (parsed) fields.data_admissao = parsed;
+    }
   }
 
   // Data de admissão
-  const admissaoMatch = text.match(/DATA\s+ADMISS[AÃ]O[\s:]+(\d{2}\/\d{2}\/\d{4})/i);
-  if (admissaoMatch) {
-    const parsed = parseBrazilianDate(admissaoMatch[1]);
-    if (parsed) fields.data_admissao = parsed;
+  // DATA ADMISSÃO regex — use lookahead for date anywhere after the keyword
+  if (!fields.data_admissao) {
+    const admissaoMatch = text.match(/DATA\s+ADMISS[AÃ]O[^0-9]*(\d{2}\/\d{2}\/\d{4})/i);
+    if (admissaoMatch) {
+      const parsed = parseBrazilianDate(admissaoMatch[1]);
+      if (parsed) fields.data_admissao = parsed;
+    }
   }
 
   // Cargo/Função
@@ -218,12 +228,12 @@ function extractHistoricoMovimentacoes(text) {
     fields.funcao = cargoMatch[1].trim().split('\n')[0].trim();
   }
 
-  // Salário: find "HISTORICO DE MUDANÇA DE SALARIO" section, get LAST monetary value
-  const salarioSectionIdx = text.search(/HISTORICO\s+DE\s+MUDAN[CÇ]A\s+DE\s+SAL[AÁ]RIO/i);
+  // Salário: find "HISTÓRICO DE MUDANÇA DE SALÁRIO" section, get LAST monetary value
+  const salarioSectionIdx = text.search(/HIST[OÓ]RICO\s+DE\s+MUDAN[CÇ]A\s+DE\s+SAL[AÁ]RIO/i);
   if (salarioSectionIdx !== -1) {
     // Find next section header or end of text
     const afterSection = text.slice(salarioSectionIdx);
-    const nextSectionMatch = afterSection.slice(50).search(/HISTORICO\s+DE\s+/i);
+    const nextSectionMatch = afterSection.slice(50).search(/HIST[OÓ]RICO\s+DE\s+/i);
     const sectionText = nextSectionMatch !== -1
       ? afterSection.slice(0, nextSectionMatch + 50)
       : afterSection;
@@ -240,8 +250,8 @@ function extractHistoricoMovimentacoes(text) {
     }
   }
 
-  // Afastamentos: find "HISTORICO DE AFASTAMENTOS" section
-  const afastamentoSectionIdx = text.search(/HISTORICO\s+DE\s+AFASTAMENTOS/i);
+  // Bug fix: PDF has accented "HISTÓRICO DE AFASTAMENTOS"
+  const afastamentoSectionIdx = text.search(/HIST[OÓ]RICO\s+DE\s+AFASTAMENTOS/i);
   if (afastamentoSectionIdx !== -1) {
     const sectionText = text.slice(afastamentoSectionIdx);
     const sectionLines = sectionText.split('\n').slice(1); // skip header line
@@ -269,8 +279,9 @@ function extractHistoricoMovimentacoes(text) {
 
     const flushBuffer = () => {
       if (dateBuffer.length >= 2) {
-        const dataInicio = parseBrazilianDate(dateBuffer[0]);
-        const dataFim = parseBrazilianDate(dateBuffer[1]);
+        // PDF text order is [DATA_FIM, DATA_INICIO] — swap to get correct order
+        const dataInicio = parseBrazilianDate(dateBuffer[1]);
+        const dataFim = parseBrazilianDate(dateBuffer[0]);
         if (dataInicio && dataFim) {
           const { motivo, tipo } = classifyMotivo(motivoBuffer);
           afastamentos.push({ data_inicio: dataInicio, data_fim: dataFim, motivo, tipo });
@@ -283,7 +294,7 @@ function extractHistoricoMovimentacoes(text) {
     for (const line of sectionLines) {
       if (!line.trim()) continue;
       // Stop at next major section (but not AFASTAMENTOS itself)
-      if (/HISTORICO\s+DE\s+/i.test(line) && !/AFASTAMENTO/i.test(line)) break;
+      if (/HIST[OÓ]RICO\s+DE\s+/i.test(line) && !/AFASTAMENTO/i.test(line)) break;
       // Skip header lines (INICIO, FIM, MOTIVO, etc.)
       if (/^(INICIO|IN[IÍ]CIO|FIM|DATA|MOTIVO|TIPO|DIAS)\s/i.test(line.trim())) continue;
 
@@ -292,9 +303,9 @@ function extractHistoricoMovimentacoes(text) {
       if (datesInLine.length >= 2) {
         // Flush previous buffer if any
         flushBuffer();
-        // Extract both dates and optional motivo from this line
-        const dataInicio = parseBrazilianDate(datesInLine[0][1]);
-        const dataFim = parseBrazilianDate(datesInLine[1][1]);
+        // PDF text order is [DATA_FIM, DATA_INICIO] — swap to get correct order
+        const dataInicio = parseBrazilianDate(datesInLine[1][1]);
+        const dataFim = parseBrazilianDate(datesInLine[0][1]);
         if (dataInicio && dataFim) {
           // Motivo: everything after the second date
           const afterSecondDate = line.slice(line.indexOf(datesInLine[1][1]) + 10).trim();
@@ -358,6 +369,10 @@ function extractCartaoPonto(text) {
   let lastValidDate = null;
   let pendingDate = null; // date found on a line without times — check next line for times
 
+  // Pre-scan: find any 4-digit year as hint for day-only lines when no month header found
+  const yearHintMatch = text.match(/\b(20\d{2})\b/);
+  const globalYearHint = yearHintMatch ? yearHintMatch[1] : null;
+
   for (const line of lines) {
     const trimmed = line.trim();
     const upper = trimmed.toUpperCase();
@@ -383,7 +398,14 @@ function extractCartaoPonto(text) {
     // Skip lines with ignore keywords
     if (IGNORE_KEYWORDS.some(kw => upper.includes(kw))) continue;
 
+    // Check for ≥2 time patterns (HH:MM), or 1 time + a recognisable date
     const times = trimmed.match(/\d{2}:\d{2}/g);
+    const hasFullDate = /(\d{2})[\/\-\.](\d{2})[\/\-\.](\d{4})/.test(trimmed);
+    const hasDDMM = /^\d{1,2}[\/\-]\d{2}\b/.test(trimmed);
+
+    if ((!times || times.length < 1) && !hasFullDate) continue;
+    if (times && times.length < 2 && !hasFullDate && !hasDDMM) continue;
+
     const fullDateMatch = trimmed.match(/(\d{2})[\/\-\.](\d{2})[\/\-\.](\d{4})/);
 
     if (fullDateMatch) {
@@ -396,6 +418,14 @@ function extractCartaoPonto(text) {
         // Date alone — times may be on the next line
         pendingDate = dateStr;
       }
+      continue;
+    }
+
+    // Try DD/MM at start (espelho de ponto format "07/01 08:00 ...")
+    const ddmmMatch = trimmed.match(/^(\d{1,2})[\/\-](\d{2})\b/);
+    if (ddmmMatch && (currentYear || globalYearHint)) {
+      const year = currentYear || globalYearHint;
+      lastValidDate = `${year}-${ddmmMatch[2]}-${ddmmMatch[1].padStart(2, '0')}`;
       continue;
     }
 
@@ -432,117 +462,102 @@ function extractFichaFinanceira(text) {
   const fields = {};
   const lines = text.split('\n');
 
-  // Structure: group lines by month/period
-  // Look for month markers and collect codes 001, 017, 125
-  // Format: <month> <year> PERIODO 1 / PERIODO 2
-  // Line format: <cod> <description> <value>
+  // The actual PDF format does NOT have month-name headers or PERIODO 1/2 labels.
+  // Instead it uses "PERÍODO : /" + "MÊS e ANO :" (blank values) as block separators.
+  // Lines with entries end with a 3-digit code: e.g. "01.514,0030,00SALARIO BASE001"
+  // Line format (proventos): <hours><valor><ref><DESCRIPTION><CODE>
+  // Line format (descontos): <valor><ref><DESCRIPTION><CODE>
+  // The first currency value on the line is always the amount.
 
-  const months = {};
-  let currentKey = null; // "YYYY-MM"
-  let currentPeriod = null; // 1 or 2
-
-  const monthNames = {
-    'janeiro': '01', 'fevereiro': '02', 'março': '03', 'marco': '03',
-    'abril': '04', 'maio': '05', 'junho': '06', 'julho': '07',
-    'agosto': '08', 'setembro': '09', 'outubro': '10',
-    'novembro': '11', 'dezembro': '12'
+  // Helper: first currency value found in a text string
+  const firstCurrency = (str) => {
+    const m = str.match(/(\d{1,3}(?:\.\d{3})*,\d{2})/);
+    return m ? parseBrazilianCurrency(m[1]) : null;
   };
 
+  // Split into period blocks on "PERÍODO" or "MÊS e ANO" markers
+  const blocks = [];
+  let curBlock = [];
   for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-
-    // Detect month header
-    const monthNameMatch = trimmed.match(
-      /(janeiro|fevereiro|março|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)[^\d]*(\d{4})/i
-    );
-    if (monthNameMatch) {
-      const m = monthNames[monthNameMatch[1].toLowerCase()];
-      currentKey = `${monthNameMatch[2]}-${m}`;
-      currentPeriod = 1; // default to period 1 until explicit "PERIODO 2" marker
-      if (!months[currentKey]) months[currentKey] = { p1: {}, p2: {} };
+    const t = line.trim();
+    if (!t) continue;
+    if (/PER[IÍ]ODO\s*:/i.test(t) || /M[EÊ]S\s+[Ee]\s*ANO\s*:/i.test(t)) {
+      if (curBlock.length > 0) { blocks.push(curBlock); curBlock = []; }
       continue;
     }
+    curBlock.push(t);
+  }
+  if (curBlock.length > 0) blocks.push(curBlock);
 
-    // Detect PERIODO 1 / PERIODO 2
-    if (/PERIODO\s*1/i.test(trimmed)) { currentPeriod = 1; continue; }
-    if (/PERIODO\s*2/i.test(trimmed)) { currentPeriod = 2; continue; }
+  // Classify each block and collect entries keyed by 3-digit code
+  const extractBlock = (blockLines) => {
+    const entries = {};
+    for (const l of blockLines) {
+      // Line must end with a 3-digit code not preceded by comma (not decimal)
+      const m = l.match(/^(.*[A-ZÀ-Ÿa-zà-ÿ\.\sº\/])\s*(\d{3})$/);
+      if (!m) continue;
+      const code = m[2];
+      const val = firstCurrency(l);
+      if (val && val > 0) entries[code] = val;
+    }
+    return entries;
+  };
 
-    if (!currentKey || !currentPeriod) continue;
+  // Primary extraction: targeted code searches across all lines (most reliable)
+  // P2 blocks have SALARIO BASE (001); P1 blocks have ADIANTAMENTO SALARIAL (017)
+  let lastSalario = null;
+  let lastAdiantamento = null;
+  let lastDescAdiant = null;
+  let lastAdiant13 = null;
 
-    // Parse line: starts with 3-digit code
-    const codeMatch = trimmed.match(/^(\d{3})\s+(.+?)\s+([\d\.,]+)\s*$/);
-    if (codeMatch) {
-      const code = codeMatch[1];
-      const value = parseBrazilianCurrency(codeMatch[3]);
-      if (value === null || value === 0) continue;
-
-      const period = currentPeriod === 1 ? 'p1' : 'p2';
-      if (!months[currentKey][period][code]) {
-        months[currentKey][period][code] = 0;
-      }
-      months[currentKey][period][code] += value;
+  for (const l of lines) {
+    const t = l.trim();
+    if (/SALAR[IÍ]O\s+BASE.*001$/i.test(t)) {
+      const v = firstCurrency(t);
+      if (v) lastSalario = v;
+    }
+    if (/ADIANTAMENTO\s+SALARIAL.*017$/i.test(t)) {
+      const v = firstCurrency(t);
+      if (v) lastAdiantamento = v;
+    }
+    if (/DESC[^\d]*ADIANT[^\d]*SALAR.*125$/i.test(t)) {
+      const v = firstCurrency(t);
+      if (v) lastDescAdiant = v;
+    }
+    // 1ª parcela 13º — code 035
+    if (/1[aª][\.\s]*PARC.*13[oº].*035$/i.test(t)) {
+      const v = firstCurrency(t);
+      if (v) lastAdiant13 = v;
     }
   }
 
-  // Find the most recent month with values
-  const sortedKeys = Object.keys(months).sort().reverse();
-  let targetKey = null;
-  for (const key of sortedKeys) {
-    const m = months[key];
-    const hasValues = Object.values(m.p1).some(v => v > 0) || Object.values(m.p2).some(v => v > 0);
-    if (hasValues) { targetKey = key; break; }
+  // Fallback: SALÁRIO ATUAL header line (e.g. "SALÁRIO ATUAL.: 1.914,00")
+  if (!lastSalario) {
+    const salAtualMatch = text.match(/SAL[AÁ]RIO\s+ATUAL[.:\s]+(\d{1,3}(?:\.\d{3})*,\d{2})/i);
+    if (salAtualMatch) lastSalario = parseBrazilianCurrency(salAtualMatch[1]);
   }
 
-  // Always store all months for later use by calculator
-  fields.ficha_meses_json = JSON.stringify(months);
+  if (lastSalario) fields.salario = lastSalario;
+  if (lastAdiantamento) fields.adiantamento_quinzena = lastAdiantamento;
+  if (lastAdiant13) fields.adiantamento_decimo_terceiro = lastAdiant13;
 
-  if (targetKey) {
-    const m = months[targetKey];
-
-    // Salary: code 001 from PERIODO 2
-    if (m.p2['001']) {
-      fields.salario = m.p2['001'];
-    } else if (m.p1['001']) {
-      fields.salario = m.p1['001'];
-    }
-
-    // Adiantamento salarial: code 017 from PERIODO 1 (already received by employee)
-    const adiantamento = (m.p1['017'] || 0);
-    if (adiantamento > 0) {
-      fields.adiantamento_quinzena = adiantamento;
-    }
-
-    // Fechamento: code 001 from PERIODO 2 (salary payment for second half if already paid)
-    const fechamento = (m.p2['001'] || 0);
-    if (fechamento > 0) {
-      fields.fechamento_salario = fechamento;
-    }
-
-    // Build deductions list:
-    // - Adiantamento (017 period 1): already paid to employee → deduct from saldo
-    // - Fechamento (001 period 2): if already paid → deduct from saldo
-    // - Other period 2 deductions (125, etc.)
-    const deducoes = [];
-    if (adiantamento > 0) {
-      deducoes.push({ codigo: '017', periodo: 1, descricao: 'Adiantamento Salarial', valor: adiantamento });
-    }
-    if (fechamento > 0) {
-      deducoes.push({ codigo: '001', periodo: 2, descricao: 'Fechamento Salarial', valor: fechamento });
-    }
-    // Additional period 2 deductions (125, etc. — excluding 001 and 017 already handled)
-    const extraDeductionCodes = ['125'];
-    for (const code of extraDeductionCodes) {
-      if (m.p2[code]) {
-        deducoes.push({ codigo: code, periodo: 2, descricao: `Desconto cód.${code}`, valor: m.p2[code] });
-      }
-    }
-
-    if (deducoes.length > 0) {
-      fields.deducoes_ficha = JSON.stringify(deducoes);
-      fields.total_deducoes_mes_rescisao = deducoes.reduce((sum, d) => sum + d.valor, 0);
-    }
+  // Build deductions
+  const deducoes = [];
+  if (lastAdiantamento) {
+    deducoes.push({ codigo: '017', periodo: 1, descricao: 'Adiantamento Salarial', valor: lastAdiantamento });
   }
+  if (lastDescAdiant) {
+    deducoes.push({ codigo: '125', periodo: 2, descricao: 'Desc. Adiantamento Salarial', valor: lastDescAdiant });
+  }
+  if (deducoes.length > 0) {
+    fields.deducoes_ficha = JSON.stringify(deducoes);
+    fields.total_deducoes_mes_rescisao = deducoes.reduce((s, d) => s + d.valor, 0);
+  }
+
+  // Also store block-based data for calculator compatibility
+  const allBlocks = {};
+  blocks.forEach((b, i) => { allBlocks[i] = extractBlock(b); });
+  fields.ficha_meses_json = JSON.stringify(allBlocks);
 
   return fields;
 }
@@ -564,7 +579,7 @@ function extractHistoricoFerias(text) {
   // Find the section with aquisitive periods
   let inPeriodSection = false;
   for (const line of lines) {
-    // Activate section only on explicit period/férias headers
+    // Activate section on explicit férias/period headers (remote version is more specific, avoids false positives)
     if (/PER[IÍ]ODO\s+AQUISITIVO/i.test(line) ||
         /HIST[OÓ]RICO\s+DE\s+F[EÉ]RIAS/i.test(line) ||
         /REL.*11\.004/i.test(line)) {
@@ -583,16 +598,30 @@ function extractHistoricoFerias(text) {
 
     const dates = datesInLine.map(m => parseBrazilianDate(m[1]));
 
-    // Expect at least [aquisitivo_inicio, aquisitivo_fim]
     if (!dates[0] || !dates[1]) continue;
 
-    const periodo = {
-      aquisitivo_inicio: dates[0],
-      aquisitivo_fim: dates[1],
-      gozo_inicio: dates[2] || null,
-      gozo_fim: dates[3] || null,
-      gozada: !!(dates[2])
-    };
+    // PDF text column order (verified from actual extractions):
+    //   4 dates: [gozo_fim, gozo_inicio, aquisitivo_fim, aquisitivo_inicio]
+    //   2 dates: [aquisitivo_fim, aquisitivo_inicio]
+    let periodo;
+    if (dates.length >= 4 && dates[2] && dates[3]) {
+      periodo = {
+        aquisitivo_inicio: dates[3],
+        aquisitivo_fim: dates[2],
+        gozo_inicio: dates[1],
+        gozo_fim: dates[0],
+        gozada: true
+      };
+    } else {
+      // 2-date line = férias vencidas (not yet taken)
+      periodo = {
+        aquisitivo_inicio: dates[1],
+        aquisitivo_fim: dates[0],
+        gozo_inicio: null,
+        gozo_fim: null,
+        gozada: false
+      };
+    }
     periodos.push(periodo);
   }
 
