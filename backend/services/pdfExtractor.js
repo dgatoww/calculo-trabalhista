@@ -551,7 +551,9 @@ function extractFichaFinanceira(text) {
   }
   if (deducoes.length > 0) {
     fields.deducoes_ficha = JSON.stringify(deducoes);
-    fields.total_deducoes_mes_rescisao = deducoes.reduce((s, d) => s + d.valor, 0);
+    const totalDeducoes = deducoes.reduce((s, d) => s + d.valor, 0);
+    fields.total_deducoes_mes_rescisao = totalDeducoes;
+    fields.total_deducoes = totalDeducoes; // alias expected by DataReview
   }
 
   // Also store block-based data for calculator compatibility
@@ -630,6 +632,7 @@ function extractHistoricoFerias(text) {
 
     const vencidas = periodos.filter(p => !p.gozada);
     fields.ferias_vencidas_count = vencidas.length;
+    fields.dias_ferias_vencidas = vencidas.length * 30; // alias expected by DataReview
     if (vencidas.length > 0) {
       fields.ferias_vencidas_periodos = JSON.stringify(vencidas);
     }

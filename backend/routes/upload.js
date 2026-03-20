@@ -6,6 +6,7 @@ const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const db = require('../database/db');
 const pdfExtractor = require('../services/pdfExtractor');
+const { calculateAvosFerias } = require('../services/calculator');
 
 // Configure multer storage
 const storage = multer.diskStorage({
@@ -96,6 +97,22 @@ router.post('/:id/upload', upload.single('file'), async (req, res) => {
             }
           }
         }
+      }
+
+      // Compute avos_ferias_proporcionais if data_admissao and data_rescisao are now available
+      try {
+        const allFields = await db.getCaseData(id);
+        const caseFields = {};
+        allFields.forEach(f => { caseFields[f.field] = f.value; });
+        if (caseFields.data_admissao && caseFields.data_rescisao) {
+          const afastamentos = caseFields.afastamentos ? JSON.parse(caseFields.afastamentos) : [];
+          const avos = calculateAvosFerias(caseFields.data_admissao, caseFields.data_rescisao, afastamentos);
+          if (avos > 0) {
+            await db.upsertCaseData(uuidv4(), id, 'avos_ferias_proporcionais', String(avos), 'computed');
+          }
+        }
+      } catch (e) {
+        console.warn('Could not compute avos_ferias_proporcionais:', e.message);
       }
 
       // Update case status
